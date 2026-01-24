@@ -1,0 +1,130 @@
+# ROS2 Build Artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+*.egg
+.pytest_cache/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.code-workspace
+
+# Compiled Object files
+*.o
+*.lo
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+
+# Catkin (ROS1 compat)
+devel/
+.catkin_workspace
+.catkin_tools/
+
+# Bags and logs
+*.bag
+*.bag.active
+*.log
+
+# Generated documentation
+docs/_build/
+*.dox
+
+# Testing
+test_results/
+*.test
+
+# Eclipse (CDT)
+.cproject
+.project
+.settings/
+
+# QtCreator
+*.user
+*.autosave
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+
+# OSX
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Backup files
+*~
+*.bak
+*.backup
+
+# Temporary files
+*.tmp
+*.temp
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Debug files
+*.dSYM/
+
+# PDF files
+*.pdf
+
+# Image files (optional - uncomment if needed)
+# *.png
+# *.jpg
+# *.jpeg

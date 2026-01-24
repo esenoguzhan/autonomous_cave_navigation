@@ -8,6 +8,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import PathJoinSubstitution
+from ament_index_python.packages import get_package_share_directory
+import os
 
 
 def generate_launch_description():
@@ -96,11 +98,19 @@ def generate_launch_description():
         output="screen",
     )
 
+    # Load controller parameters from config file
+    controller_config = os.path.join(
+        get_package_share_directory('controller_pkg'),
+        'config',
+        'controller_params.yaml'
+    )
+    
     controller_node = Node(
         package="controller_pkg",
         executable="controller_node",
         name="controller_node",
         output="screen",
+        parameters=[controller_config],
     )
 
     # Static TF publishers (ROS2 CLI style args; verify for your ROS2 distro)

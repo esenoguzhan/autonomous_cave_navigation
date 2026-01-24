@@ -15,14 +15,9 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_eigen REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(mav_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
-find_package(tf2_geometry_msgs REQUIRED)
-
-
-
-
-
 
 # Eigen
 find_package(eigen3_cmake_module QUIET)
@@ -46,18 +41,16 @@ ament_target_dependencies(controller_node
   tf2_geometry_msgs
 )
 
-#target_link_libraries(controller_node
-#   tf2_geometry_msgs::tf2_geometry_msgs
-#)
-
-target_link_libraries(controller_node tf2::tf2 tf2_ros::tf2_ros)
-
 # --- Install -----------------------------------------------------------------
 install(TARGETS controller_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -70,7 +63,6 @@ ament_export_dependencies(
   tf2_ros
   tf2_eigen
   Eigen3
-  tf2_geometry_msgs
 )
 
 ament_package()

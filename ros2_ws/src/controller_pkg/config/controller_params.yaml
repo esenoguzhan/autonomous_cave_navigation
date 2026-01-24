@@ -1,5 +1,56 @@
-# todo: add controller parameters here
+# Controller Configuration File
+# All parameters are REQUIRED - node will fail if any parameter is missing
 
-params: {
-                     ...
-}
+/**:
+  ros__parameters:
+    # =============================================================================
+    # CONTROLLER GAINS (Tuning Parameters)
+    # =============================================================================
+    # Based on Lee et al. "Geometric tracking control of a quadrotor UAV on SE(3)"
+    # These gains control how aggressively the controller responds to errors
+    
+    kx: 12.0        # Position error gain - Higher = faster position correction
+    kv: 5.0         # Velocity damping gain - Higher = smoother motion, less overshoot
+    kr: 8.5         # Rotation error gain - Higher = faster attitude correction
+    komega: 1.1     # Angular velocity damping - Higher = less rotational oscillation
+    
+    # =============================================================================
+    # CONTROL LOOP CONFIGURATION
+    # =============================================================================
+    
+    control_loop_hz: 1000.0  # Hz - Main control loop frequency (typical: 500-1000 Hz)
+    
+    # =============================================================================
+    # PHYSICAL CONSTANTS
+    # =============================================================================
+    # These must match your actual quadrotor specifications
+    
+    mass: 1.0               # kg - Total mass of the UAV (affects thrust calculation)
+    gravity: 9.81           # m/s^2 - Gravitational acceleration (Earth standard)
+    arm_length: 0.3         # m - Distance from center of mass to propeller center
+    lift_coefficient: 1e-3  # Propeller lift coefficient: thrust = cf * omega^2
+    drag_coefficient: 1e-5  # Propeller drag coefficient: torque = cd * omega^2
+    
+    # =============================================================================
+    # INERTIA MATRIX (Diagonal Elements)
+    # =============================================================================
+    # Moment of inertia about each body axis (affects rotational dynamics)
+    
+    inertia_xx: 1.0         # kg*m^2 - Inertia about x-axis (roll)
+    inertia_yy: 1.0         # kg*m^2 - Inertia about y-axis (pitch)
+    inertia_zz: 1.0         # kg*m^2 - Inertia about z-axis (yaw)
+    
+    # =============================================================================
+    # ROS TOPIC CONFIGURATION
+    # =============================================================================
+    
+    # Subscribed Topics
+    desired_state_topic: "desired_state"          # trajectory_msgs/MultiDOFJointTrajectoryPoint
+    current_state_topic: "current_state_est"      # nav_msgs/Odometry
+    
+    # Published Topics
+    rotor_speed_cmd_topic: "rotor_speed_cmds"     # mav_msgs/Actuators
+    
+    # Topic Queue Sizes
+    subscriber_queue_size: 10   # Buffer size for incoming messages
+    publisher_queue_size: 10    # Buffer size for outgoing messages

@@ -1,7 +1,6 @@
 #include <cmath>
 #include <memory>
 #include <string>
-#include <iostream>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -9,11 +8,9 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <trajectory_msgs/msg/multi_dof_joint_trajectory_point.hpp>
 
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-
-
 #include <Eigen/Dense>
 #include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #define PI M_PI
 
@@ -54,16 +51,17 @@ class ControllerNode : public rclcpp::Node {
   //   3. a timer for your main control loop
   //
   // ~~~~ begin solution
-  //
-   // ~~~~ begin solution
-  //
+
+  // Subscribers for desired and current UAV states
   rclcpp::Subscription<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr desired_state_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr current_state_sub_;
-  rclcpp::Publisher<mav_msgs::msg::Actuators>::SharedPtr motor_pub_;
+  
+  // Publisher for propeller speeds
+  rclcpp::Publisher<mav_msgs::msg::Actuators>::SharedPtr rotor_pub_;
+  
+  // Timer for main control loop
   rclcpp::TimerBase::SharedPtr control_timer_;
-  //
-  // ~~~~ end solution
-  //
+
   // ~~~~ end solution
   // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
   //                                 end part 1
@@ -97,9 +95,7 @@ class ControllerNode : public rclcpp::Node {
 
   double hz;             // frequency of the main control loop
   
-  bool got_current_{false};
-  bool got_desired_{false};
-
+  bool received_desired_state_;  // flag to check if we've received desired state
 
   static Eigen::Vector3d Vee(const Eigen::Matrix3d& in){
     Eigen::Vector3d out;
@@ -113,91 +109,143 @@ class ControllerNode : public rclcpp::Node {
 
 public:
   ControllerNode()
-: rclcpp::Node("controller_node"),
-  e3(0,0,1),
-  F2W(4,4),
-  hz(1000.0)
-{
-  x.setZero();
-  v.setZero();
-  omega.setZero();
-  xd.setZero();
-  vd.setZero();
-  ad.setZero();
-  R.setIdentity();
-  yawd = 0.0;
+  : rclcpp::Node("controller_node"),
+    e3(0,0,1),
+    F2W(4,4),
+    received_desired_state_(false)
+  {
+    // Declare all parameters as REQUIRED (no default values)
+    this->declare_parameter<double>("kx");
+    this->declare_parameter<double>("kv");
+    this->declare_parameter<double>("kr");
+    this->declare_parameter<double>("komega");
+    this->declare_parameter<double>("control_loop_hz");
+    this->declare_parameter<double>("mass");
+    this->declare_parameter<double>("gravity");
+    this->declare_parameter<double>("arm_length");
+    this->declare_parameter<double>("lift_coefficient");
+    this->declare_parameter<double>("drag_coefficient");
+    this->declare_parameter<double>("inertia_xx");
+    this->declare_parameter<double>("inertia_yy");
+    this->declare_parameter<double>("inertia_zz");
+    this->declare_parameter<std::string>("desired_state_topic");
+    this->declare_parameter<std::string>("current_state_topic");
+    this->declare_parameter<std::string>("rotor_speed_cmd_topic");
+    this->declare_parameter<int>("subscriber_queue_size");
+    this->declare_parameter<int>("publisher_queue_size");
 
+    // Load controller gains from parameters
+    if (!loadParameters()) {
+      RCLCPP_FATAL(this->get_logger(), 
+        "Failed to load required parameters. Node cannot start.");
+      rclcpp::shutdown();
+      return;
+    }
 
-    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    //  PART 2 |  Initialize ROS callback handlers
-    // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~  ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
-    //
-    // In this section, you need to initialize your handlers from part 1.
-    // Specifically:
-    //  - bind controllerNode::onDesiredState() to the topic "desired_state"
-    //  - bind controllerNode::onCurrentState() to the topic "current_state"
-    //  - bind controllerNode::controlLoop() to the created timer, at frequency
-    //    given by the "hz" variable
-    //
-    // Hints:
-    //  - read the lab handout to find the message type
-    //
-    // ~~~~ begin solution
-    //
-        // ~~~~ begin solution
-    //
-    // Subscriber for desired state
+    // Get queue sizes and topic names
+    int sub_queue_size = this->get_parameter("subscriber_queue_size").as_int();
+    int pub_queue_size = this->get_parameter("publisher_queue_size").as_int();
+    std::string desired_state_topic = this->get_parameter("desired_state_topic").as_string();
+    std::string current_state_topic = this->get_parameter("current_state_topic").as_string();
+    std::string rotor_cmd_topic = this->get_parameter("rotor_speed_cmd_topic").as_string();
+
+    // Initialize subscribers
     desired_state_sub_ = this->create_subscription<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>(
-      "desired_state", rclcpp::QoS(10),
+      desired_state_topic, sub_queue_size, 
       std::bind(&ControllerNode::onDesiredState, this, std::placeholders::_1));
     
-    // Subscriber for current state
     current_state_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-      "current_state", rclcpp::QoS(10),
+      current_state_topic, sub_queue_size,
       std::bind(&ControllerNode::onCurrentState, this, std::placeholders::_1));
     
-    // Publisher for rotor speed commands
-    motor_pub_ = this->create_publisher<mav_msgs::msg::Actuators>(
-      "rotor_speed_cmds", rclcpp::QoS(10));
+    // Initialize publisher
+    rotor_pub_ = this->create_publisher<mav_msgs::msg::Actuators>(rotor_cmd_topic, pub_queue_size);
     
-    // Timer for control loop (hz frequency)
+    // Initialize timer for control loop
     control_timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(static_cast<int>(1000.0 / hz)),
+      std::chrono::duration<double>(1.0 / hz),
       std::bind(&ControllerNode::controlLoop, this));
-    //
-    // ~~~~ end solution
-    //
-    // ~~~~ end solution
-    //
-    // ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~
-    //                                 end part 2
-    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    //  PART 6 [NOTE: save this for last] |  Tune your gains!
-    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    // Controller gains (move to parameters.yaml for convenience if you like)
-    kx = 1.8;
-    kv = 1.45;             //    **** FIDDLE WITH THESE! ***
-    kr = 6.5;
-    komega = 0.8;
-
-    // Initialize constants
-    m = 1.0;
-    cd = 1e-5;
-    cf = 1e-3;
-    g = 9.81;
-    d = 0.3;
-    J << 1.0,0.0,0.0,
-         0.0,1.0,0.0,
-         0.0,0.0,1.0;
-
-    RCLCPP_INFO(this->get_logger(), "controller_node ready (hz=%.1f)", hz);
+    // Log successful initialization
+    RCLCPP_INFO(this->get_logger(), "╔════════════════════════════════════════════════════════════╗");
+    RCLCPP_INFO(this->get_logger(), "║       Controller Node Initialized Successfully            ║");
+    RCLCPP_INFO(this->get_logger(), "╚════════════════════════════════════════════════════════════╝");
+    RCLCPP_INFO(this->get_logger(), "Control Loop Frequency: %.1f Hz", hz);
+    RCLCPP_INFO(this->get_logger(), "Controller Gains:");
+    RCLCPP_INFO(this->get_logger(), "  kx=%.2f, kv=%.2f, kr=%.2f, komega=%.2f", kx, kv, kr, komega);
+    RCLCPP_INFO(this->get_logger(), "Physical Properties:");
+    RCLCPP_INFO(this->get_logger(), "  mass=%.2f kg, gravity=%.2f m/s^2, arm_length=%.2f m", m, g, d);
+    RCLCPP_INFO(this->get_logger(), "Topics:");
+    RCLCPP_INFO(this->get_logger(), "  Subscribing: %s", desired_state_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Subscribing: %s", current_state_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Publishing:  %s", rotor_cmd_topic.c_str());
   }
 
-  void onDesiredState(const trajectory_msgs::msg::MultiDOFJointTrajectoryPoint::SharedPtr des_state_msg){
+private:
+  bool loadParameters() {
+    try {
+      // Load controller gains
+      kx = this->get_parameter("kx").as_double();
+      kv = this->get_parameter("kv").as_double();
+      kr = this->get_parameter("kr").as_double();
+      komega = this->get_parameter("komega").as_double();
       
+      // Load control loop frequency
+      hz = this->get_parameter("control_loop_hz").as_double();
+      
+      // Load physical constants
+      m = this->get_parameter("mass").as_double();
+      g = this->get_parameter("gravity").as_double();
+      d = this->get_parameter("arm_length").as_double();
+      cf = this->get_parameter("lift_coefficient").as_double();
+      cd = this->get_parameter("drag_coefficient").as_double();
+      
+      // Load inertia matrix
+      double Jxx = this->get_parameter("inertia_xx").as_double();
+      double Jyy = this->get_parameter("inertia_yy").as_double();
+      double Jzz = this->get_parameter("inertia_zz").as_double();
+      J << Jxx, 0.0, 0.0,
+           0.0, Jyy, 0.0,
+           0.0, 0.0, Jzz;
 
+      // Validate parameters
+      if (kx <= 0 || kv <= 0 || kr <= 0 || komega <= 0) {
+        RCLCPP_ERROR(this->get_logger(), "Controller gains must be positive!");
+        return false;
+      }
+      
+      if (hz <= 0 || hz > 10000) {
+        RCLCPP_ERROR(this->get_logger(), "Invalid control loop frequency: %.1f Hz", hz);
+        return false;
+      }
+      
+      if (m <= 0 || g <= 0 || d <= 0 || cf <= 0 || cd <= 0) {
+        RCLCPP_ERROR(this->get_logger(), "Physical constants must be positive!");
+        return false;
+      }
+      
+      if (Jxx <= 0 || Jyy <= 0 || Jzz <= 0) {
+        RCLCPP_ERROR(this->get_logger(), "Inertia values must be positive!");
+        return false;
+      }
+
+      return true;
+      
+    } catch (const rclcpp::exceptions::ParameterNotDeclaredException& e) {
+      RCLCPP_FATAL(this->get_logger(), "Parameter not declared: %s", e.what());
+      return false;
+    } catch (const rclcpp::ParameterTypeException& e) {
+      RCLCPP_FATAL(this->get_logger(), "Parameter type mismatch: %s", e.what());
+      return false;
+    } catch (const std::exception& e) {
+      RCLCPP_FATAL(this->get_logger(), "Error loading parameters: %s", e.what());
+      return false;
+    }
+  }
+
+public:
+
+  void onDesiredState(const trajectory_msgs::msg::MultiDOFJointTrajectoryPoint::SharedPtr des_state_msg){
       // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       //  PART 3 | Objective: fill in xd, vd, ad, yawd
       // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -209,22 +257,20 @@ public:
       // Hint: use "v << vx, vy, vz;" to fill in a vector with Eigen.
       //
       // ~~~~ begin solution
-      //
-      double xdx = des_state_msg->transforms[0].translation.x;
-      double xdy = des_state_msg->transforms[0].translation.y;
-      double xdz = des_state_msg->transforms[0].translation.z;
-      xd << xdx, xdy, xdz;
+      
+      // 3.1 Extract position, velocity and acceleration
+      xd << des_state_msg->transforms[0].translation.x,
+            des_state_msg->transforms[0].translation.y,
+            des_state_msg->transforms[0].translation.z;
+      
+      vd << des_state_msg->velocities[0].linear.x,
+            des_state_msg->velocities[0].linear.y,
+            des_state_msg->velocities[0].linear.z;
+      
+      ad << des_state_msg->accelerations[0].linear.x,
+            des_state_msg->accelerations[0].linear.y,
+            des_state_msg->accelerations[0].linear.z;
 
-      double vdx = des_state_msg->velocities[0].linear.x;
-      double vdy = des_state_msg->velocities[0].linear.y;
-      double vdz = des_state_msg->velocities[0].linear.z;
-      vd << vdx, vdy, vdz;
-
-      double adx = des_state_msg->accelerations[0].linear.x;
-      double ady = des_state_msg->accelerations[0].linear.y;
-      double adz = des_state_msg->accelerations[0].linear.z;
-      ad << adx, ady, adz;
-      //
       // ~~~~ end solution
       //
       // 3.2 Extract the yaw component from the quaternion in the incoming ROS
@@ -232,14 +278,16 @@ public:
       //
       //  Hints:
       //    - use tf2::getYaw(des_state_msg->transforms[0].rotation)
-      yawd = tf2::getYaw(des_state_msg->transforms[0].rotation);
       //
       // ~~~~ begin solution
-      //
-      //     **** FILL IN HERE ***
+      
+      // 3.2 Extract yaw from quaternion
+      yawd = tf2::getYaw(des_state_msg->transforms[0].rotation);
+      
       // ~~~~ end solution
-      got_desired_ = true;
-
+      
+      // Mark that we've received desired state
+      received_desired_state_ = true;
   }
 
   void onCurrentState(const nav_msgs::msg::Odometry::SharedPtr cur_state_msg){
@@ -254,58 +302,41 @@ public:
       //          needs to be in the body frame!
       //
       // ~~~~ begin solution
-      //
-      //     **** FILL IN HERE ***
-      double xx = cur_state_msg->pose.pose.position.x;
-      double yy = cur_state_msg->pose.pose.position.y;
-      double zz = cur_state_msg->pose.pose.position.z;
-      x << xx, yy, zz;
-
-      double vx = cur_state_msg->twist.twist.linear.x;
-      double vy = cur_state_msg->twist.twist.linear.y;
-      double vz = cur_state_msg->twist.twist.linear.z;
-      v << vx, vy, vz;
-
-      // From quaternion to rotation matrix
-      Eigen::Quaterniond q(
-        cur_state_msg->pose.pose.orientation.w,
-        cur_state_msg->pose.pose.orientation.x,
-        cur_state_msg->pose.pose.orientation.y,
-        cur_state_msg->pose.pose.orientation.z
-      );
-      R = q.toRotationMatrix();  // Converts quaternion to 3x3 rotation matrix
-
+      
+      // Extract current position
+      x << cur_state_msg->pose.pose.position.x,
+           cur_state_msg->pose.pose.position.y,
+           cur_state_msg->pose.pose.position.z;
+      
+      // Extract current velocity
+      v << cur_state_msg->twist.twist.linear.x,
+           cur_state_msg->twist.twist.linear.y,
+           cur_state_msg->twist.twist.linear.z;
+      
+      // Extract current orientation (convert quaternion to rotation matrix)
+      Eigen::Quaterniond q(cur_state_msg->pose.pose.orientation.w,
+                           cur_state_msg->pose.pose.orientation.x,
+                           cur_state_msg->pose.pose.orientation.y,
+                           cur_state_msg->pose.pose.orientation.z);
+      R = q.toRotationMatrix();
+      
+      // Extract angular velocity and convert from world frame to body frame
       Eigen::Vector3d omega_world;
-
-      double wx = cur_state_msg->twist.twist.angular.x;
-      double wy = cur_state_msg->twist.twist.angular.y;
-      double wz = cur_state_msg->twist.twist.angular.z;
-      omega_world << wx, wy, wz;
-
+      omega_world << cur_state_msg->twist.twist.angular.x,
+                     cur_state_msg->twist.twist.angular.y,
+                     cur_state_msg->twist.twist.angular.z;
       omega = R.transpose() * omega_world;
 
-
-      
-
-
-
-
-      //
       // ~~~~ end solution
-      got_current_ = true;
-
   }
 
   void controlLoop(){
-  
-    Eigen::Vector3d ex, ev, er, eomega;
-    if (!got_current_ || !got_desired_) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-    "Waiting for state/trajectory messages... Got Current: %d, Got Desired: %d", 
-    got_current_, got_desired_);
+    // Don't publish control commands until we've received a desired state
+    if (!received_desired_state_) {
       return;
     }
-
+    
+    Eigen::Vector3d ex, ev, er, eomega;
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     //  PART 5 | Objective: Implement the controller!
@@ -315,10 +346,11 @@ public:
     //  Hint: [1], eq. (6), (7)
     //
     // ~~~~ begin solution
-    //
-    ex = x - xd;
-    ev = v - vd;
-    //
+    
+    // 5.1 Compute position and velocity errors - [1] eq. (6), (7)
+    ex = x - xd;      // Position error: current - desired
+    ev = v - vd;      // Velocity error: current - desired
+    
     // ~~~~ end solution
 
     // 5.2 Compute the Rd matrix.
@@ -337,25 +369,27 @@ public:
     //    - remember to normalize your axes!
     //
     // ~~~~ begin solution
-    //
-    Eigen::Vector3d b3d;
-    Eigen::Vector3d b2d;
-    Eigen::Vector3d b1d;
-    Eigen::Vector3d b1d_projected;
-    Eigen::Matrix3d Rd; 
-
-    b3d = (-kx * ex - kv *ev + m*g*e3 + m*ad).normalized();
-    b1d << cos(yawd), sin(yawd), 0;
-    b2d = b3d.cross(b1d).normalized();
-    b1d_projected = b2d.cross(b3d).normalized();
-    Rd << b1d_projected, b2d, b3d;
-
     
+    // 5.2 Compute the desired rotation matrix Rd - [1] eq. (12)
+    
+    // Step 1: Compute b3d (desired z-body axis) - [1] eq. (12)
+    // Note: Z-axes are flipped compared to paper, so we use +g instead of -g
+    Eigen::Vector3d b3d = (-kx * ex - kv * ev + m * g * e3 + m * ad);
+    b3d.normalize();  // Normalize to unit vector
+    
+    // Step 2: Compute b1d (desired x-body axis) using yaw
+    Eigen::Vector3d b1c(cos(yawd), sin(yawd), 0);  // Direction in yaw
+    Eigen::Vector3d b1d = b1c.cross(b3d);
+    b1d.normalize();  // Normalize to unit vector
+    
+    // Step 3: Compute b2d (desired y-body axis) using right-hand rule
+    Eigen::Vector3d b2d = b3d.cross(b1d);
+    // b2d is automatically normalized since b3d and b1d are orthonormal
+    
+    // Step 4: Assemble the desired rotation matrix
+    Eigen::Matrix3d Rd;
+    Rd << b1d, b2d, b3d;  // [b1d | b2d | b3d] as columns
 
-
-
-
-   
     // ~~~~ end solution
     //
     // 5.3 Compute the orientation error (er) and the rotation-rate error (eomega)
@@ -368,14 +402,16 @@ public:
     //        effects on the closed-loop dynamics.
     //
     // ~~~~ begin solution
-    //
-    er = 0.5 * Vee(Rd.transpose() * R - R.transpose() * Rd);
-    eomega = omega;
-
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-    "DEBUG Errors | |ex|=%.4f |ev|=%.4f |er|=%.4f |eomega|=%.4f",
-    ex.norm(), ev.norm(), er.norm(), eomega.norm());
-    //
+    
+    // 5.3 Compute orientation and angular velocity errors - [1] eq. (10), (11)
+    
+    // Orientation error - [1] eq. (10)
+    Eigen::Matrix3d eR_matrix = 0.5 * (Rd.transpose() * R - R.transpose() * Rd);
+    er = Vee(eR_matrix);
+    
+    // Angular velocity error - [1] eq. (11) (simplified, ignoring Omega_d terms)
+    eomega = -omega;  // Assuming desired angular velocity is zero
+    
     // ~~~~ end solution
     //
     // 5.4 Compute the desired wrench (force + torques) to control the UAV.
@@ -394,16 +430,20 @@ public:
     //      effects on the closed-loop dynamics.
     //
     // ~~~~ begin solution
-    //
-    Eigen::Vector3d f_world;
-    Eigen::Vector3d M;
-
-    f_world = -kx * ex - kv * ev + m*g*e3 + m*ad;
-    double f = f_world.dot(R.col(2));
-
-    M = -kr * er - komega * eomega + omega.cross(J*omega);
-  
-    //
+    
+    // 5.4 Compute desired wrench (force + torques) - [1] eq. (15), (16)
+    
+    // Compute desired total thrust force - [1] eq. (15)
+    // Note: Z-axis flipped, so we use +mg instead of -mg, and + sign instead of -
+    double f = (-kx * ex - kv * ev + m * g * e3 + m * ad).dot(R * e3);
+    
+    // Compute desired torques - [1] eq. (16) (simplified, ignoring Omega_d terms)
+    Eigen::Vector3d M = -kr * er - komega * eomega + omega.cross(J * omega);
+    
+    // Assemble wrench vector [force; torques]
+    Eigen::Vector4d wrench;
+    wrench << f, M(0), M(1), M(2);
+    
     // ~~~~ end solution
     //
     // 5.5 Recover the rotor speeds from the wrench computed above
@@ -430,36 +470,33 @@ public:
     //       direction!
     //
     // ~~~~ begin solution
-    //
-    Eigen::Vector4d M1, M2, M3, f_row;
-    f_row << 1,1,1,1;
-    M1 << d*sin(M_PI/4), d*cos(M_PI/4), -d * sin(M_PI/4), -d * cos(M_PI/4);
-    M2 << -d*cos(M_PI/4), d*sin(M_PI/4), d * cos(M_PI/4), -d * sin(M_PI/4);
-    M3 << cd/cf , -cd/cf , cd/cf , -cd/cf ;
-    F2W << f_row.transpose(), 
-           M1.transpose(), 
-           M2.transpose(), 
-           M3.transpose();
-
-    Eigen::Vector4d wrench;
-    wrench << f,      // Element 0: force (scalar from part 5.4)
-            M(0),    // Element 1: torque x
-            M(1),    // Element 2: torque y
-            M(2);    // Element 3: torque z
     
-    Eigen::Vector4d motor_thrusts = F2W.inverse() * wrench;
-
+    // 5.5 Recover rotor speeds from wrench - [1] eq. (1) with frame adjustments
     
-    Eigen::Vector4d w_squared = motor_thrusts / cf;
+    // Setup wrench-to-rotor mapping matrix F2W according to our frame convention
+    // Note: 45° rotation from paper's frame convention (equation 6.9 in lecture notes)
+    double sqrt2_over_2 = sqrt(2.0) / 2.0;
+    double tau_f = cd / cf;  // Drag-to-lift ratio (our convention)
+    
+    // F2W << cf,        cf,        cf,        cf,
+    //        cf*d*sqrt2_over_2, -cf*d*sqrt2_over_2, -cf*d*sqrt2_over_2, cf*d*sqrt2_over_2,
+    //       -cf*d*sqrt2_over_2, -cf*d*sqrt2_over_2,  cf*d*sqrt2_over_2, cf*d*sqrt2_over_2,
+    //       -cd,        cd,       -cd,        cd;
 
-    // Extract rotor speeds (with sign)
+    F2W << cf,        cf,        cf,        cf,
+           cf*d*sqrt2_over_2, cf*d*sqrt2_over_2, -cf*d*sqrt2_over_2, -cf*d*sqrt2_over_2,
+          -cf*d*sqrt2_over_2, cf*d*sqrt2_over_2,  cf*d*sqrt2_over_2, -cf*d*sqrt2_over_2,
+          cd,        -cd,        cd,        -cd;
+    
+    // Solve for squared rotor speeds: F2W * w^2 = wrench
+    Eigen::Vector4d w_squared = F2W.colPivHouseholderQr().solve(wrench);
+    
+    // Extract individual rotor speeds (with sign preservation)
     double w1 = signed_sqrt(w_squared(0));
     double w2 = signed_sqrt(w_squared(1));
     double w3 = signed_sqrt(w_squared(2));
     double w4 = signed_sqrt(w_squared(3));
-
     
-    //
     // ~~~~ end solution
     //
     // 5.6 Populate and publish the control message
@@ -468,19 +505,18 @@ public:
     // to use signed_sqrt function).
     //
     // ~~~~ begin solution
-    //
-    // ~~~~ begin solution
-//
+    
+    // 5.6 Create and publish control message with computed rotor speeds
     mav_msgs::msg::Actuators cmd;
     cmd.angular_velocities.resize(4);
-    cmd.angular_velocities[0] = w1;
-    cmd.angular_velocities[1] = w2;
-    cmd.angular_velocities[2] = w3;
-    cmd.angular_velocities[3] = w4;
-    motor_pub_->publish(cmd);
-//
-// ~~~~ end solution
-    //
+    cmd.angular_velocities[0] = w1;  // Rotor 1 speed
+    cmd.angular_velocities[1] = w2;  // Rotor 2 speed  
+    cmd.angular_velocities[2] = w3;  // Rotor 3 speed
+    cmd.angular_velocities[3] = w4;  // Rotor 4 speed
+    
+    // Publish the control command
+    rotor_pub_->publish(cmd);
+    
     // ~~~~ end solution
 
     // Example publish skeleton (keep after you compute rotor speeds):
