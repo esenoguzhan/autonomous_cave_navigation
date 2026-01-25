@@ -1,0 +1,25 @@
+trajectory_planner_node:
+  ros__parameters:
+    # Trajectory generation parameters
+    max_v: 5.0          # Maximum velocity (m/s)
+    max_a: 2.0          # Maximum acceleration (m/s^2)
+    sampling_dt: 0.02   # Sampling interval (50 Hz)
+    
+    # Waypoints from takeoff position to cave entrance
+    # These define the path the drone will follow
+    waypoints:
+      x: [-38.0, -108.875, -180.0, -251.375, -323.0]
+      y: [10.0, 10.0, 10.0, 10.0, 10.0]
+      z: [15.0, 18.75, 20.0, 18.75, 15.0]
+    
+    # Topic names
+    current_state_topic: "current_state_est"
+    desired_state_topic: "desired_state"
+    trajectory_complete_topic: "trajectory_complete"
+    
+    # Service names
+    start_navigation_service: "start_navigation"
+    
+    # Queue sizes
+    subscriber_queue_size: 10
+    publisher_queue_size: 10
