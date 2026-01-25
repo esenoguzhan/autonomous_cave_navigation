@@ -1,0 +1,20 @@
+mission_control_node:
+  ros__parameters:
+    # State machine parameters
+    state_machine_hz: 10.0  # Hz
+    idle_duration: 3.0  # seconds
+    
+    # Takeoff parameters
+    takeoff_altitude: 9.0  # meters
+    
+    # Tolerances for state transitions
+    position_tolerance: 0.3  # meters
+    velocity_tolerance: 0.1  # m/s
+    
+    # Topic names
+    desired_state_topic: "desired_state"
+    current_state_topic: "current_state_est"
+    
+    # Queue sizes
+    subscriber_queue_size: 10
+    publisher_queue_size: 10

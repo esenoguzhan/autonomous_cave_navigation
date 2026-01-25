@@ -1,0 +1,4 @@
+initial drone pose: (-38.0, 10.0, 6.5)
+cave entrance: (-323.0, 10.0, 15.0)
+
+/autonomous_cave_navigation/ros2_ws/install/simulation/lib/simulation$ chmod +x Simulation.x86_64
