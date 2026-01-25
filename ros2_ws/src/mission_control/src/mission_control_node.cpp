@@ -7,6 +7,8 @@
 #include <trajectory_msgs/msg/multi_dof_joint_trajectory_point.hpp>
 #include <geometry_msgs/msg/transform.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <std_msgs/msg/empty.hpp>
+#include <std_srvs/srv/empty.hpp>
 
 #include <Eigen/Dense>
 #include <tf2/utils.h>
@@ -18,6 +20,7 @@ using namespace std::chrono_literals;
 enum class MissionState {
   IDLE,
   TAKEOFF,
+  NAVIGATE_TO_CAVE,
   FINISHED
 };
 
@@ -26,6 +29,7 @@ std::string stateToString(MissionState state) {
   switch(state) {
     case MissionState::IDLE: return "IDLE";
     case MissionState::TAKEOFF: return "TAKEOFF";
+    case MissionState::NAVIGATE_TO_CAVE: return "NAVIGATE_TO_CAVE";
     case MissionState::FINISHED: return "FINISHED";
     default: return "UNKNOWN";
   }
@@ -38,7 +42,9 @@ private:
   
   // ROS communication
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr current_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr trajectory_complete_sub_;
   rclcpp::Publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr desired_state_pub_;
+  rclcpp::Client<std_srvs::srv::Empty>::SharedPtr start_navigation_client_;
   rclcpp::TimerBase::SharedPtr state_machine_timer_;
   
   // Current UAV state
@@ -55,6 +61,10 @@ private:
   double state_machine_hz_;
   double idle_duration_;
   
+  // Navigation state
+  bool navigation_triggered_;
+  bool trajectory_completed_;
+  
   // Timing
   rclcpp::Time state_start_time_;
   rclcpp::Time idle_start_time_;
@@ -67,7 +77,9 @@ public:
     current_velocity_(0, 0, 0),
     current_yaw_(0.0),
     desired_yaw_(0.0),
-    received_current_state_(false)
+    received_current_state_(false),
+    navigation_triggered_(false),
+    trajectory_completed_(false)
   {
     // Declare all parameters as REQUIRED (no default values for critical params)
     this->declare_parameter<double>("takeoff_altitude");
@@ -77,6 +89,8 @@ public:
     this->declare_parameter<double>("idle_duration", 3.0);
     this->declare_parameter<std::string>("current_state_topic", "current_state_est");
     this->declare_parameter<std::string>("desired_state_topic", "desired_state");
+    this->declare_parameter<std::string>("start_navigation_service", "start_navigation");
+    this->declare_parameter<std::string>("trajectory_complete_topic", "trajectory_complete");
     this->declare_parameter<int>("subscriber_queue_size", 10);
     this->declare_parameter<int>("publisher_queue_size", 10);
     
@@ -91,6 +105,8 @@ public:
     // Get topic names and queue sizes
     std::string current_state_topic = this->get_parameter("current_state_topic").as_string();
     std::string desired_state_topic = this->get_parameter("desired_state_topic").as_string();
+    std::string start_navigation_service = this->get_parameter("start_navigation_service").as_string();
+    std::string trajectory_complete_topic = this->get_parameter("trajectory_complete_topic").as_string();
     int sub_queue_size = this->get_parameter("subscriber_queue_size").as_int();
     int pub_queue_size = this->get_parameter("publisher_queue_size").as_int();
     
@@ -99,9 +115,16 @@ public:
       current_state_topic, sub_queue_size,
       std::bind(&MissionControlNode::onCurrentState, this, std::placeholders::_1));
     
+    trajectory_complete_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+      trajectory_complete_topic, sub_queue_size,
+      std::bind(&MissionControlNode::onTrajectoryComplete, this, std::placeholders::_1));
+    
     // Initialize publishers
     desired_state_pub_ = this->create_publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>(
       desired_state_topic, pub_queue_size);
+    
+    // Initialize service client
+    start_navigation_client_ = this->create_client<std_srvs::srv::Empty>(start_navigation_service);
     
     // Initialize state machine timer
     state_machine_timer_ = this->create_wall_timer(
@@ -126,6 +149,9 @@ public:
     RCLCPP_INFO(this->get_logger(), "Topics:");
     RCLCPP_INFO(this->get_logger(), "  Subscribing: %s", current_state_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "  Publishing:  %s", desired_state_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Trajectory Complete: %s", trajectory_complete_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "Services:");
+    RCLCPP_INFO(this->get_logger(), "  Start Navigation: %s", start_navigation_service.c_str());
   }
 
 private:
@@ -192,6 +218,11 @@ private:
     received_current_state_ = true;
   }
   
+  void onTrajectoryComplete(const std_msgs::msg::Empty::SharedPtr /*msg*/) {
+    RCLCPP_INFO(this->get_logger(), "Received trajectory_complete signal");
+    trajectory_completed_ = true;
+  }
+  
   void publishDesiredState(const Eigen::Vector3d& position, 
                           const Eigen::Vector3d& velocity = Eigen::Vector3d::Zero(),
                           const Eigen::Vector3d& acceleration = Eigen::Vector3d::Zero(),
@@ -250,6 +281,12 @@ private:
                   stateToString(new_state).c_str());
       current_state_ = new_state;
       state_start_time_ = this->now();
+      
+      // Reset state-specific flags on transition
+      if (new_state == MissionState::NAVIGATE_TO_CAVE) {
+        navigation_triggered_ = false;
+        trajectory_completed_ = false;
+      }
     }
   }
   
@@ -267,6 +304,10 @@ private:
         
       case MissionState::TAKEOFF:
         handleTakeoffState();
+        break;
+        
+      case MissionState::NAVIGATE_TO_CAVE:
+        handleNavigateToCaveState();
         break;
         
       case MissionState::FINISHED:
@@ -314,13 +355,47 @@ private:
       RCLCPP_INFO(this->get_logger(), 
                   "Takeoff complete! Reached altitude: %.2f m", 
                   current_position_.z());
-      RCLCPP_INFO(this->get_logger(), "Mission complete - transitioning to FINISHED state");
-      transitionToState(MissionState::FINISHED);
+      RCLCPP_INFO(this->get_logger(), "Starting navigation to cave entrance...");
+      transitionToState(MissionState::NAVIGATE_TO_CAVE);
     } else {
       double distance_to_target = (current_position_ - target_position).norm();
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                           "TAKEOFF: Current altitude: %.2f m | Target: %.2f m | Distance: %.2f m | Yaw: %.2f°",
                           current_position_.z(), takeoff_altitude_, distance_to_target, current_yaw_ * 180.0 / M_PI);
+    }
+  }
+  
+  void handleNavigateToCaveState() {
+    // On first entry, trigger the trajectory planner
+    if (!navigation_triggered_) {
+      RCLCPP_INFO(this->get_logger(), "Triggering trajectory planner...");
+      
+      // Check if service is available
+      if (!start_navigation_client_->wait_for_service(1s)) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+          "start_navigation service not available, waiting...");
+        return;
+      }
+      
+      // Send request to start navigation
+      auto request = std::make_shared<std_srvs::srv::Empty::Request>();
+      auto future = start_navigation_client_->async_send_request(request);
+      
+      navigation_triggered_ = true;
+      RCLCPP_INFO(this->get_logger(), "Navigation trigger sent to trajectory_planner");
+    }
+    
+    // Wait for trajectory completion
+    // Note: trajectory_planner handles desired_state publishing during this state
+    if (trajectory_completed_) {
+      RCLCPP_INFO(this->get_logger(), 
+        "Navigation to cave complete! Final position: [%.2f, %.2f, %.2f]",
+        current_position_.x(), current_position_.y(), current_position_.z());
+      transitionToState(MissionState::FINISHED);
+    } else {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+        "NAVIGATE_TO_CAVE: Executing trajectory... Position: [%.2f, %.2f, %.2f]",
+        current_position_.x(), current_position_.y(), current_position_.z());
     }
   }
   

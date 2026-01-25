@@ -11,7 +11,7 @@ import os
 
 
 def generate_launch_description():
-    # Include simulation launch file
+    # Include simulation launch file (includes Unity sim, controller, sensors, TF)
     simulation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([FindPackageShare("simulation"), "launch", "simulation.launch.py"])
@@ -34,7 +34,24 @@ def generate_launch_description():
         parameters=[mission_control_config],
     )
 
+    # Load trajectory planner parameters from config file
+    trajectory_planner_config = os.path.join(
+        get_package_share_directory('trajectory_planner'),
+        'config',
+        'trajectory_planner_params.yaml'
+    )
+    
+    # Trajectory planner node
+    trajectory_planner_node = Node(
+        package="trajectory_planner",
+        executable="trajectory_planner_node",
+        name="trajectory_planner_node",
+        output="screen",
+        parameters=[trajectory_planner_config],
+    )
+
     return LaunchDescription([
         simulation_launch,
         mission_control_node,
+        trajectory_planner_node,
     ])
