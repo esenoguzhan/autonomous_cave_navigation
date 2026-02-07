@@ -128,3 +128,7 @@ coverage.xml
 # *.png
 # *.jpg
 # *.jpeg
+
+# Ignore Unity simulation build & project
+src/simulation/unity_sim/
+
