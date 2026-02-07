@@ -48,7 +48,7 @@ public:
       std::bind(&LanternDetector::odomCallback, this, std::placeholders::_1));
 
     semantic_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-      "/unity_ros/Quadrotor/Sensors/SemanticCamera/image_raw", rclcpp::QoS(10),
+      "/Quadrotor/Sensors/SemanticCamera/image_raw", rclcpp::QoS(10),
       std::bind(&LanternDetector::semanticCallback, this, std::placeholders::_1));
 
     depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(

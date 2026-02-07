@@ -50,7 +50,11 @@ ament_target_dependencies(detection_node
 install(TARGETS detection_node
   DESTINATION lib/${PROJECT_NAME}
 )
-
+install(DIRECTORY
+  launch
+  config
+  DESTINATION share/${PROJECT_NAME}
+)
 # --------------------
 # Testing
 # --------------------

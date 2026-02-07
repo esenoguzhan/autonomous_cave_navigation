@@ -1,0 +1,11 @@
+detection_node:
+  ros__parameters:
+    # --- Distance thresholds ---
+    distance_threshold: 100.0
+    drone_lantern_dist: 30.0
+
+    # --- Frames ---
+    camera_frame: "camera"
+    world_frame: "world"
+
+    # debug: true
