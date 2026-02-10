@@ -9,6 +9,8 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_srvs/srv/empty.hpp>
+#include <std_srvs/srv/trigger.hpp>
+#include <future>
 
 #include <Eigen/Dense>
 #include <tf2/utils.h>
@@ -21,6 +23,7 @@ enum class MissionState {
   IDLE,
   TAKEOFF,
   NAVIGATE_TO_CAVE,
+  EXPLORE_CAVE,
   FINISHED
 };
 
@@ -30,6 +33,7 @@ std::string stateToString(MissionState state) {
     case MissionState::IDLE: return "IDLE";
     case MissionState::TAKEOFF: return "TAKEOFF";
     case MissionState::NAVIGATE_TO_CAVE: return "NAVIGATE_TO_CAVE";
+    case MissionState::EXPLORE_CAVE: return "EXPLORE_CAVE";
     case MissionState::FINISHED: return "FINISHED";
     default: return "UNKNOWN";
   }
@@ -45,6 +49,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr trajectory_complete_sub_;
   rclcpp::Publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr desired_state_pub_;
   rclcpp::Client<std_srvs::srv::Empty>::SharedPtr start_navigation_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_exploration_client_;
   rclcpp::TimerBase::SharedPtr state_machine_timer_;
   
   // Current UAV state
@@ -64,6 +69,7 @@ private:
   // Navigation state
   bool navigation_triggered_;
   bool trajectory_completed_;
+  bool exploration_triggered_;
   
   // Timing
   rclcpp::Time state_start_time_;
@@ -79,7 +85,8 @@ public:
     desired_yaw_(0.0),
     received_current_state_(false),
     navigation_triggered_(false),
-    trajectory_completed_(false)
+    trajectory_completed_(false),
+    exploration_triggered_(false)
   {
     // Declare all parameters as REQUIRED (no default values for critical params)
     this->declare_parameter<double>("takeoff_altitude");
@@ -90,6 +97,7 @@ public:
     this->declare_parameter<std::string>("current_state_topic", "current_state_est");
     this->declare_parameter<std::string>("desired_state_topic", "desired_state");
     this->declare_parameter<std::string>("start_navigation_service", "start_navigation");
+    this->declare_parameter<std::string>("start_exploration_service", "start_exploration");
     this->declare_parameter<std::string>("trajectory_complete_topic", "trajectory_complete");
     this->declare_parameter<int>("subscriber_queue_size", 10);
     this->declare_parameter<int>("publisher_queue_size", 10);
@@ -106,6 +114,7 @@ public:
     std::string current_state_topic = this->get_parameter("current_state_topic").as_string();
     std::string desired_state_topic = this->get_parameter("desired_state_topic").as_string();
     std::string start_navigation_service = this->get_parameter("start_navigation_service").as_string();
+    std::string start_exploration_service = this->get_parameter("start_exploration_service").as_string();
     std::string trajectory_complete_topic = this->get_parameter("trajectory_complete_topic").as_string();
     int sub_queue_size = this->get_parameter("subscriber_queue_size").as_int();
     int pub_queue_size = this->get_parameter("publisher_queue_size").as_int();
@@ -125,6 +134,7 @@ public:
     
     // Initialize service client
     start_navigation_client_ = this->create_client<std_srvs::srv::Empty>(start_navigation_service);
+    start_exploration_client_ = this->create_client<std_srvs::srv::Trigger>(start_exploration_service);
     
     // Initialize state machine timer
     state_machine_timer_ = this->create_wall_timer(
@@ -152,6 +162,7 @@ public:
     RCLCPP_INFO(this->get_logger(), "  Trajectory Complete: %s", trajectory_complete_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "Services:");
     RCLCPP_INFO(this->get_logger(), "  Start Navigation: %s", start_navigation_service.c_str());
+    RCLCPP_INFO(this->get_logger(), "  Start Exploration: %s", start_exploration_service.c_str());
   }
 
 private:
@@ -287,6 +298,9 @@ private:
         navigation_triggered_ = false;
         trajectory_completed_ = false;
       }
+      if (new_state == MissionState::EXPLORE_CAVE) {
+        exploration_triggered_ = false;
+      }
     }
   }
   
@@ -308,6 +322,10 @@ private:
         
       case MissionState::NAVIGATE_TO_CAVE:
         handleNavigateToCaveState();
+        break;
+        
+      case MissionState::EXPLORE_CAVE:
+        handleExploreCaveState();
         break;
         
       case MissionState::FINISHED:
@@ -389,14 +407,40 @@ private:
     // Note: trajectory_planner handles desired_state publishing during this state
     if (trajectory_completed_) {
       RCLCPP_INFO(this->get_logger(), 
-        "Navigation to cave complete! Final position: [%.2f, %.2f, %.2f]",
+        "Navigation to cave complete! Final position: [%.2f, %.2f, %.2f]. Transitioning to EXPLORE_CAVE...",
         current_position_.x(), current_position_.y(), current_position_.z());
-      transitionToState(MissionState::FINISHED);
+      transitionToState(MissionState::EXPLORE_CAVE);
     } else {
       RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
         "NAVIGATE_TO_CAVE: Executing trajectory... Position: [%.2f, %.2f, %.2f]",
         current_position_.x(), current_position_.y(), current_position_.z());
     }
+  }
+
+  void handleExploreCaveState() {
+    // In this state, we hand over control to the cave_explorer node.
+    // We stop publishing desired_state to avoid fighting with Nav2's controller output.
+    
+    if (!exploration_triggered_) {
+      RCLCPP_INFO(this->get_logger(), "Triggering cave_explorer...");
+
+      if (!start_exploration_client_->wait_for_service(1s)) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+          "Waiting for start_exploration service...");
+        return;
+      }
+      
+      auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+      // We don't block here, just send async
+      auto future = start_exploration_client_->async_send_request(request);
+      
+      exploration_triggered_ = true;
+      RCLCPP_INFO(this->get_logger(), "Exploration trigger sent.");
+    }
+    
+    // Monitor state. We are in exploration mode.
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
+      "EXPLORE_CAVE: Exploration in progress.");
   }
   
   void handleFinishedState() {
