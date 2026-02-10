@@ -131,15 +131,3 @@ ament_export_dependencies(
 )
 
 ament_package()
-
-# --- Install Unity Simulation binaries ---
-install(PROGRAMS
-  unity_sim/Simulation.x86_64
-  unity_sim/UnityPlayer.so
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-install(DIRECTORY
-  unity_sim/Simulation_Data
-  DESTINATION lib/${PROJECT_NAME}
-)
