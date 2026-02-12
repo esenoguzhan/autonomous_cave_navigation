@@ -36,9 +36,9 @@
     # =============================================================================
     # Moment of inertia about each body axis (affects rotational dynamics)
     
-    inertia_xx: 1.0         # kg*m^2 - Inertia about x-axis (roll)
-    inertia_yy: 1.0         # kg*m^2 - Inertia about y-axis (pitch)
-    inertia_zz: 1.0         # kg*m^2 - Inertia about z-axis (yaw)
+    inertia_xx: 0.01        # kg*m^2 - Inertia about x-axis (roll)
+    inertia_yy: 0.01        # kg*m^2 - Inertia about y-axis (pitch)
+    inertia_zz: 0.02        # kg*m^2 - Inertia about z-axis (yaw)
     
     # =============================================================================
     # ROS TOPIC CONFIGURATION

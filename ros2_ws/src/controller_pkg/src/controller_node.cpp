@@ -96,6 +96,7 @@ class ControllerNode : public rclcpp::Node {
   double hz;             // frequency of the main control loop
   
   bool received_desired_state_;  // flag to check if we've received desired state
+  bool received_current_state_;  // flag to check if we've received current state
 
   static Eigen::Vector3d Vee(const Eigen::Matrix3d& in){
     Eigen::Vector3d out;
@@ -112,7 +113,12 @@ public:
   : rclcpp::Node("controller_node"),
     e3(0,0,1),
     F2W(4,4),
-    received_desired_state_(false)
+    received_desired_state_(false),
+    received_current_state_(false),
+    x(0,0,0),
+    v(0,0,0),
+    R(Eigen::Matrix3d::Identity()),
+    omega(0,0,0)
   {
     // Declare all parameters as REQUIRED (no default values)
     this->declare_parameter<double>("kx");
@@ -327,12 +333,15 @@ public:
                      cur_state_msg->twist.twist.angular.z;
       omega = R.transpose() * omega_world;
 
+      // Mark that we've received current state
+      received_current_state_ = true;
+
       // ~~~~ end solution
   }
 
   void controlLoop(){
-    // Don't publish control commands until we've received a desired state
-    if (!received_desired_state_) {
+    // Don't publish control commands until we've received both desired and current state
+    if (!received_desired_state_ || !received_current_state_) {
       return;
     }
     
@@ -377,14 +386,14 @@ public:
     Eigen::Vector3d b3d = (-kx * ex - kv * ev + m * g * e3 + m * ad);
     b3d.normalize();  // Normalize to unit vector
     
-    // Step 2: Compute b1d (desired x-body axis) using yaw
+    // Step 2: Compute b2d (desired y-body axis) using b3d and yaw
     Eigen::Vector3d b1c(cos(yawd), sin(yawd), 0);  // Direction in yaw
-    Eigen::Vector3d b1d = b1c.cross(b3d);
-    b1d.normalize();  // Normalize to unit vector
+    Eigen::Vector3d b2d = b3d.cross(b1c);
+    b2d.normalize();
     
-    // Step 3: Compute b2d (desired y-body axis) using right-hand rule
-    Eigen::Vector3d b2d = b3d.cross(b1d);
-    // b2d is automatically normalized since b3d and b1d are orthonormal
+    // Step 3: Compute b1d (desired x-body axis) using right-hand rule
+    Eigen::Vector3d b1d = b2d.cross(b3d);
+    b1d.normalize();
     
     // Step 4: Assemble the desired rotation matrix
     Eigen::Matrix3d Rd;
