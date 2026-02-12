@@ -7,9 +7,11 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <trajectory_msgs/msg/multi_dof_joint_trajectory_point.hpp>
 #include <std_msgs/msg/empty.hpp>
-#include <std_srvs/srv/empty.hpp>
 #include <geometry_msgs/msg/transform.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
+
+#include "trajectory_planner/srv/execute_trajectory.hpp"
 
 #include <Eigen/Dense>
 #include <tf2/utils.h>
@@ -30,7 +32,7 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr current_state_sub_;
   rclcpp::Publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr desired_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr trajectory_complete_pub_;
-  rclcpp::Service<std_srvs::srv::Empty>::SharedPtr start_navigation_srv_;
+  rclcpp::Service<trajectory_planner::srv::ExecuteTrajectory>::SharedPtr start_navigation_srv_;
   rclcpp::TimerBase::SharedPtr sampling_timer_;
   
   // Current UAV state
@@ -71,9 +73,11 @@ public:
     this->declare_parameter<double>("max_v", 5.0);
     this->declare_parameter<double>("max_a", 2.0);
     this->declare_parameter<double>("sampling_dt", 0.02);
+    // Waypoints are now passed via service, but we can keep params as default/fallback or for debugging
     this->declare_parameter<std::vector<double>>("waypoints.x", std::vector<double>());
     this->declare_parameter<std::vector<double>>("waypoints.y", std::vector<double>());
     this->declare_parameter<std::vector<double>>("waypoints.z", std::vector<double>());
+    
     this->declare_parameter<std::string>("current_state_topic", "current_state_est");
     this->declare_parameter<std::string>("desired_state_topic", "desired_state");
     this->declare_parameter<std::string>("trajectory_complete_topic", "trajectory_complete");
@@ -110,7 +114,7 @@ public:
       trajectory_complete_topic, pub_queue_size);
     
     // Initialize service
-    start_navigation_srv_ = this->create_service<std_srvs::srv::Empty>(
+    start_navigation_srv_ = this->create_service<trajectory_planner::srv::ExecuteTrajectory>(
       start_navigation_service,
       std::bind(&TrajectoryPlannerNode::onStartNavigation, this, 
                 std::placeholders::_1, std::placeholders::_2));
@@ -123,7 +127,6 @@ public:
     RCLCPP_INFO(this->get_logger(), "  Max Velocity: %.2f m/s", max_v_);
     RCLCPP_INFO(this->get_logger(), "  Max Acceleration: %.2f m/s^2", max_a_);
     RCLCPP_INFO(this->get_logger(), "  Sampling Rate: %.0f Hz", 1.0 / sampling_dt_);
-    RCLCPP_INFO(this->get_logger(), "  Waypoints: %zu points", waypoints_x_.size());
     RCLCPP_INFO(this->get_logger(), "Topics:");
     RCLCPP_INFO(this->get_logger(), "  Subscribing: %s", current_state_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "  Publishing:  %s", desired_state_topic.c_str());
@@ -138,23 +141,11 @@ private:
       max_v_ = this->get_parameter("max_v").as_double();
       max_a_ = this->get_parameter("max_a").as_double();
       sampling_dt_ = this->get_parameter("sampling_dt").as_double();
+      
+      // Load default waypoints if they exist (optional)
       waypoints_x_ = this->get_parameter("waypoints.x").as_double_array();
       waypoints_y_ = this->get_parameter("waypoints.y").as_double_array();
       waypoints_z_ = this->get_parameter("waypoints.z").as_double_array();
-      
-      // Validate waypoints
-      if (waypoints_x_.empty() || waypoints_y_.empty() || waypoints_z_.empty()) {
-        RCLCPP_ERROR(this->get_logger(), "Waypoints are empty!");
-        return false;
-      }
-      
-      if (waypoints_x_.size() != waypoints_y_.size() || 
-          waypoints_x_.size() != waypoints_z_.size()) {
-        RCLCPP_ERROR(this->get_logger(), 
-          "Waypoint vectors have different sizes (x: %zu, y: %zu, z: %zu)",
-          waypoints_x_.size(), waypoints_y_.size(), waypoints_z_.size());
-        return false;
-      }
       
       // Validate trajectory parameters
       if (max_v_ <= 0 || max_a_ <= 0 || sampling_dt_ <= 0) {
@@ -163,7 +154,6 @@ private:
       }
       
       return true;
-      
     } catch (const std::exception& e) {
       RCLCPP_FATAL(this->get_logger(), "Error loading parameters: %s", e.what());
       return false;
@@ -188,26 +178,50 @@ private:
   }
   
   void onStartNavigation(
-    const std::shared_ptr<std_srvs::srv::Empty::Request> /*request*/,
-    std::shared_ptr<std_srvs::srv::Empty::Response> /*response*/)
+    const std::shared_ptr<trajectory_planner::srv::ExecuteTrajectory::Request> request,
+    std::shared_ptr<trajectory_planner::srv::ExecuteTrajectory::Response> response)
   {
-    RCLCPP_INFO(this->get_logger(), "Received start_navigation request");
+    RCLCPP_INFO(this->get_logger(), "Received ExecuteTrajectory request");
     
     if (!received_current_state_) {
       RCLCPP_WARN(this->get_logger(), 
         "Cannot start navigation: No current state received yet!");
+      response->success = false;
+      response->message = "No current state received yet";
       return;
     }
     
     if (trajectory_active_) {
       RCLCPP_WARN(this->get_logger(), 
         "Trajectory already active, ignoring request");
+      response->success = false;
+      response->message = "Trajectory already active";
       return;
+    }
+
+    if (request->waypoints.poses.empty()) {
+        RCLCPP_WARN(this->get_logger(), "Received empty waypoints list");
+        response->success = false;
+        response->message = "Empty waypoints list";
+        return;
+    }
+
+    // Update waypoints from request
+    waypoints_x_.clear();
+    waypoints_y_.clear();
+    waypoints_z_.clear();
+
+    for (const auto& pose : request->waypoints.poses) {
+        waypoints_x_.push_back(pose.position.x);
+        waypoints_y_.push_back(pose.position.y);
+        waypoints_z_.push_back(pose.position.z);
     }
     
     // Generate trajectory from current position through waypoints
     if (!generateTrajectory()) {
       RCLCPP_ERROR(this->get_logger(), "Failed to generate trajectory!");
+      response->success = false;
+      response->message = "Failed to generate trajectory";
       return;
     }
     
@@ -224,6 +238,9 @@ private:
     RCLCPP_INFO(this->get_logger(), 
       "Started trajectory execution. Duration: %.2f seconds",
       trajectory_.getMaxTime());
+    
+    response->success = true;
+    response->message = "Trajectory started";
   }
   
   bool generateTrajectory() {
@@ -240,7 +257,7 @@ private:
     vertices.push_back(start);
     
     // Skip first waypoint if it's too close to current position (< 5m horizontal distance)
-    // This prevents overshoot when starting trajectory
+    // AND if we have more than 1 waypoint. If only 1 waypoint, we must go there.
     size_t start_idx = 0;
     if (!waypoints_x_.empty()) {
       Eigen::Vector3d first_waypoint(waypoints_x_[0], waypoints_y_[0], waypoints_z_[0]);
@@ -248,7 +265,8 @@ private:
       Eigen::Vector2d first_wp_xy(first_waypoint.x(), first_waypoint.y());
       double horizontal_dist = (first_wp_xy - current_pos_xy).norm();
       
-      if (horizontal_dist < 5.0) {
+      // Only skip if we have more than 1 waypoint to avoid skipping the ONLY goal
+      if (horizontal_dist < 5.0 && waypoints_x_.size() > 1) {
         RCLCPP_INFO(this->get_logger(), 
           "Skipping first waypoint (too close: %.2fm), starting from waypoint 2", 
           horizontal_dist);
@@ -256,7 +274,14 @@ private:
       }
     }
     
-    // Intermediate waypoints (skip first if too close)
+    if (waypoints_x_.empty()) {
+        RCLCPP_ERROR(this->get_logger(), "No waypoints provided for trajectory generation");
+        return false;
+    }
+
+    // Intermediate waypoints
+    // We iterate up to size-1 because the last one is the End vertex
+    // If start_idx >= size-1, this loop won't run, which is correct
     for (size_t i = start_idx; i < waypoints_x_.size() - 1; ++i) {
       mav_trajectory_generation::Vertex waypoint(dimension);
       Eigen::Vector3d pos(waypoints_x_[i], waypoints_y_[i], waypoints_z_[i]);

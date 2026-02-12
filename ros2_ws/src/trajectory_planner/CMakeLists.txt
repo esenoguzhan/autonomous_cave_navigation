@@ -24,7 +24,12 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(mav_msgs REQUIRED)
 find_package(mav_planning_msgs REQUIRED)
 find_package(mav_trajectory_generation REQUIRED)
-find_package(Eigen3 REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/ExecuteTrajectory.srv"
+  DEPENDENCIES geometry_msgs
+)
 
 # Find glog and nlopt from mav_trajectory_generation install directory
 # In a colcon workspace, packages are installed under install/<package_name>
@@ -60,6 +65,9 @@ ament_target_dependencies(trajectory_planner_node
   mav_trajectory_generation
   Eigen3
 )
+
+rosidl_target_interfaces(trajectory_planner_node
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # Link glog and nlopt explicitly
 target_link_libraries(trajectory_planner_node
