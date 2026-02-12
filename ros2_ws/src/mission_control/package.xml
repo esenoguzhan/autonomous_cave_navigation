@@ -20,10 +20,11 @@
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
+  <depend>trajectory_planner</depend>
   
   <!-- Launch dependencies -->
   <exec_depend>simulation</exec_depend>
-  <exec_depend>trajectory_planner</exec_depend>
+  <exec_depend>cave_explorer</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

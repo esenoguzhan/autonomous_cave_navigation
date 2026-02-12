@@ -1,5 +1,6 @@
 #include <memory>
 #include <string>
+#include <vector>
 #include <chrono>
 
 #include <rclcpp/rclcpp.hpp>
@@ -7,10 +8,14 @@
 #include <trajectory_msgs/msg/multi_dof_joint_trajectory_point.hpp>
 #include <geometry_msgs/msg/transform.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <std_msgs/msg/empty.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/empty.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <future>
+
+#include "trajectory_planner/srv/execute_trajectory.hpp"
 
 #include <Eigen/Dense>
 #include <tf2/utils.h>
@@ -48,7 +53,8 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr current_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr trajectory_complete_sub_;
   rclcpp::Publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr desired_state_pub_;
-  rclcpp::Client<std_srvs::srv::Empty>::SharedPtr start_navigation_client_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
+  rclcpp::Client<trajectory_planner::srv::ExecuteTrajectory>::SharedPtr start_navigation_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_exploration_client_;
   rclcpp::TimerBase::SharedPtr state_machine_timer_;
   
@@ -66,6 +72,11 @@ private:
   double state_machine_hz_;
   double idle_duration_;
   
+  // Cave entrance waypoints
+  std::vector<double> cave_waypoints_x_;
+  std::vector<double> cave_waypoints_y_;
+  std::vector<double> cave_waypoints_z_;
+
   // Navigation state
   bool navigation_triggered_;
   bool trajectory_completed_;
@@ -94,6 +105,12 @@ public:
     this->declare_parameter<double>("velocity_tolerance", 0.1);
     this->declare_parameter<double>("state_machine_hz", 10.0);
     this->declare_parameter<double>("idle_duration", 3.0);
+    
+    // Waypoints params
+    this->declare_parameter<std::vector<double>>("cave_entrance_waypoints.x", std::vector<double>());
+    this->declare_parameter<std::vector<double>>("cave_entrance_waypoints.y", std::vector<double>());
+    this->declare_parameter<std::vector<double>>("cave_entrance_waypoints.z", std::vector<double>());
+
     this->declare_parameter<std::string>("current_state_topic", "current_state_est");
     this->declare_parameter<std::string>("desired_state_topic", "desired_state");
     this->declare_parameter<std::string>("start_navigation_service", "start_navigation");
@@ -131,9 +148,10 @@ public:
     // Initialize publishers
     desired_state_pub_ = this->create_publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>(
       desired_state_topic, pub_queue_size);
+    state_pub_ = this->create_publisher<std_msgs::msg::String>("stm_mode", 10);
     
     // Initialize service client
-    start_navigation_client_ = this->create_client<std_srvs::srv::Empty>(start_navigation_service);
+    start_navigation_client_ = this->create_client<trajectory_planner::srv::ExecuteTrajectory>(start_navigation_service);
     start_exploration_client_ = this->create_client<std_srvs::srv::Trigger>(start_exploration_service);
     
     // Initialize state machine timer
@@ -156,6 +174,7 @@ public:
     RCLCPP_INFO(this->get_logger(), "  Position Tolerance: %.2f m", position_tolerance_);
     RCLCPP_INFO(this->get_logger(), "  Velocity Tolerance: %.2f m/s", velocity_tolerance_);
     RCLCPP_INFO(this->get_logger(), "  IDLE Duration: %.1f s", idle_duration_);
+    RCLCPP_INFO(this->get_logger(), "  Cave Waypoints: %zu points loaded", cave_waypoints_x_.size());
     RCLCPP_INFO(this->get_logger(), "Topics:");
     RCLCPP_INFO(this->get_logger(), "  Subscribing: %s", current_state_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "  Publishing:  %s", desired_state_topic.c_str());
@@ -176,6 +195,11 @@ private:
       velocity_tolerance_ = this->get_parameter("velocity_tolerance").as_double();
       state_machine_hz_ = this->get_parameter("state_machine_hz").as_double();
       idle_duration_ = this->get_parameter("idle_duration").as_double();
+
+      // Load cave waypoints
+      cave_waypoints_x_ = this->get_parameter("cave_entrance_waypoints.x").as_double_array();
+      cave_waypoints_y_ = this->get_parameter("cave_entrance_waypoints.y").as_double_array();
+      cave_waypoints_z_ = this->get_parameter("cave_entrance_waypoints.z").as_double_array();
       
       // Validate parameters
       if (takeoff_altitude_ <= 0) {
@@ -191,6 +215,13 @@ private:
       if (state_machine_hz_ <= 0 || state_machine_hz_ > 1000) {
         RCLCPP_ERROR(this->get_logger(), "Invalid state machine frequency: %.1f Hz", state_machine_hz_);
         return false;
+      }
+
+      if (cave_waypoints_x_.empty() || 
+          cave_waypoints_x_.size() != cave_waypoints_y_.size() || 
+          cave_waypoints_x_.size() != cave_waypoints_z_.size()) {
+          RCLCPP_ERROR(this->get_logger(), "Invalid cave entrance waypoints! Check parameters.");
+          return false;
       }
       
       return true;
@@ -305,6 +336,11 @@ private:
   }
   
   void stateMachineLoop() {
+    // Publish current state
+    std_msgs::msg::String msg;
+    msg.data = stateToString(current_state_);
+    state_pub_->publish(msg);
+
     // Don't process until we receive current state
     if (!received_current_state_) {
       return;
@@ -395,12 +431,42 @@ private:
         return;
       }
       
+      // Create request with cave entrance waypoints
+      auto request = std::make_shared<trajectory_planner::srv::ExecuteTrajectory::Request>();
+      
+      geometry_msgs::msg::PoseArray waypoints;
+      for (size_t i = 0; i < cave_waypoints_x_.size(); ++i) {
+          geometry_msgs::msg::Pose p;
+          p.position.x = cave_waypoints_x_[i];
+          p.position.y = cave_waypoints_y_[i];
+          p.position.z = cave_waypoints_z_[i];
+          
+          // Set orientation to face -X (Yaw = 180 degrees = PI radians)
+          // This ensures the drone arrives at the cave facing the interior
+          tf2::Quaternion q;
+          q.setRPY(0, 0, M_PI); 
+          p.orientation.x = q.x();
+          p.orientation.y = q.y();
+          p.orientation.z = q.z();
+          p.orientation.w = q.w();
+
+          waypoints.poses.push_back(p);
+      }
+      request->waypoints = waypoints;
+
       // Send request to start navigation
-      auto request = std::make_shared<std_srvs::srv::Empty::Request>();
-      auto future = start_navigation_client_->async_send_request(request);
+      auto future = start_navigation_client_->async_send_request(request, 
+        [this](rclcpp::Client<trajectory_planner::srv::ExecuteTrajectory>::SharedFuture future) {
+            auto result = future.get();
+            if (result->success) {
+                RCLCPP_INFO(this->get_logger(), "Trajectory planner accepted cave entrance path.");
+            } else {
+                RCLCPP_ERROR(this->get_logger(), "Trajectory planner REJECTED path: %s", result->message.c_str());
+            }
+        });
       
       navigation_triggered_ = true;
-      RCLCPP_INFO(this->get_logger(), "Navigation trigger sent to trajectory_planner");
+      RCLCPP_INFO(this->get_logger(), "Navigation trigger sent to trajectory_planner with %zu waypoints", waypoints.poses.size());
     }
     
     // Wait for trajectory completion

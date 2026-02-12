@@ -18,7 +18,14 @@ mission_control_node:
     
     # Service names
     start_navigation_service: "start_navigation"
-    
+    start_exploration_service: "start_exploration"
+
+    # Waypoints to cave entrance (formerly in trajectory_planner)
+    cave_entrance_waypoints:
+      x: [-38.0, -108.875, -180.0, -251.375, -323.0]
+      y: [10.0, 10.0, 10.0, 10.0, 10.0]
+      z: [15.0, 18.75, 20.0, 18.75, 15.0]
+
     # Queue sizes
     subscriber_queue_size: 10
     publisher_queue_size: 10

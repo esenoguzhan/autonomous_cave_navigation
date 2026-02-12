@@ -31,7 +31,10 @@ def generate_launch_description():
         executable="mission_control_node",
         name="mission_control_node",
         output="screen",
-        parameters=[mission_control_config],
+        parameters=[
+            mission_control_config,
+            {'use_sim_time': True}
+        ],
     )
 
     # Load trajectory planner parameters from config file
@@ -47,11 +50,31 @@ def generate_launch_description():
         executable="trajectory_planner_node",
         name="trajectory_planner_node",
         output="screen",
-        parameters=[trajectory_planner_config],
+        parameters=[
+            trajectory_planner_config,
+            {'use_sim_time': True}
+        ],
+    )
+
+    # Include cave_explorer launch file
+    cave_explorer_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare("cave_explorer"), "launch", "cave_explorer.launch.py"])
+        )
+    )
+
+    # Include mapping launch file
+    # mapping.launch.py should be in cave_explorer/launch too based on file struct
+    mapping_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare("cave_explorer"), "launch", "mapping.launch.py"])
+        )
     )
 
     return LaunchDescription([
         simulation_launch,
+        mapping_launch,
         mission_control_node,
         trajectory_planner_node,
+        cave_explorer_launch,
     ])

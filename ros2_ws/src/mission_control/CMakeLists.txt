@@ -16,6 +16,8 @@ find_package(trajectory_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(trajectory_planner REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 # Mission control node
 add_executable(mission_control_node src/mission_control_node.cpp)
@@ -29,6 +31,8 @@ ament_target_dependencies(mission_control_node
   tf2
   tf2_ros
   tf2_geometry_msgs
+  trajectory_planner
+  Eigen3
 )
 
 # Install executables
