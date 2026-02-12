@@ -61,23 +61,22 @@ def generate_launch_description():
         output="screen",
     )
 
+    common_params = [{"use_sim_time": True}]
+
     state_estimate_corruptor = Node(
         package="simulation",
         executable="state_estimate_corruptor_node",
         name="state_estimate_corruptor",
         output="screen",
         parameters=[
-            # drift_rw_factor
             {"drift_rw_factor": 0.03},
-            # pos_white_sig
             {"pos_white_sig": 0.005},
-            # jump_seconds
             {"jump_seconds": 20.0},
+            {"use_sim_time": True}
         ],
         condition=IfCondition(corrupt_state_estimate),
     )
 
-    # Same node but with "unless": set params to the "disabled" values
     state_estimate_corruptor_disabled = Node(
         package="simulation",
         executable="state_estimate_corruptor_node",
@@ -87,6 +86,7 @@ def generate_launch_description():
             {"drift_rw_factor": 0.0},
             {"pos_white_sig": 0.0},
             {"jump_seconds": -1.0},
+            {"use_sim_time": True}
         ],
         condition=UnlessCondition(corrupt_state_estimate),
     )
@@ -96,6 +96,7 @@ def generate_launch_description():
         executable="w_to_unity",
         name="w_to_unity",
         output="screen",
+        parameters=[{"use_sim_time": True}]
     )
 
     # Load controller parameters from config file
@@ -110,51 +111,49 @@ def generate_launch_description():
         executable="controller_node",
         name="controller_node",
         output="screen",
-        parameters=[controller_config],
+        parameters=[controller_config, {"use_sim_time": True}],
     )
 
-    # Static TF publishers (ROS2 CLI style args; verify for your ROS2 distro)
+    # Static TF publishers
     static_tf_nodes = [
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
-            name="sim_true_body",
-            arguments=["0", "0", "0", "0", "0", "0", "/Quadrotor/TrueState", "/true_body"],
-            output="screen",
-        ),
-        Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
             name="sim_rgb_camera",
-            arguments=["0", "-0.05", "0", "0", "0", "0", "/camera", "/Quadrotor/RGBCameraLeft"],
+            arguments=["0", "-0.05", "0", "0", "0", "0", "camera", "Quadrotor/RGBCameraLeft"],
+            parameters=[{"use_sim_time": True}],
             output="screen",
         ),
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             name="sim_depth_camera",
-            arguments=["0", "0", "0", "0", "0", "0", "/depth_camera", "/Quadrotor/DepthCamera"],
+            arguments=["0", "0", "0", "0", "0", "0", "depth_camera", "Quadrotor/DepthCamera"],
+            parameters=[{"use_sim_time": True}],
             output="screen",
         ),
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             name="sim_right_camera",
-            arguments=["0", "0.05", "0", "0", "0", "0", "/camera", "/Quadrotor/RGBCameraRight"],
+            arguments=["0", "0.05", "0", "0", "0", "0", "camera", "Quadrotor/RGBCameraRight"],
+            parameters=[{"use_sim_time": True}],
             output="screen",
         ),
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             name="camera_to_body",
-            arguments=["0", "0", "0", "0", "0", "0", "/true_body", "/camera"],
+            arguments=["0", "0", "0", "0", "0", "0", "true_body", "camera"],
+            parameters=[{"use_sim_time": True}],
             output="screen",
         ),
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             name="depth_camera_to_body",
-            arguments=["0", "0", "0", "0", "0", "0", "/true_body", "/depth_camera"],
+            arguments=["0", "0", "0", "0", "0", "0", "true_body", "depth_camera"],
+            parameters=[{"use_sim_time": True}],
             output="screen",
         ),
     ]
