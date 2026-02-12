@@ -20,16 +20,17 @@ def generate_launch_description():
     )
 
     pointcloud_node = Node(
-        package='depth_image_proc',
-        executable='point_cloud_xyz_node',
+        package='cave_explorer',
+        executable='depth_to_pointcloud',
         name='depth_to_pointcloud',
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}],
-        remappings=[
-            ('image_rect', '/realsense/depth/image'),
-            ('camera_info', '/realsense/depth/camera_info'),
-            ('points', '/realsense/depth/points'),
-        ]
+        respawn=True,
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'depth_topic': '/realsense/depth/image',
+            'info_topic': '/realsense/depth/camera_info',
+            'cloud_topic': '/realsense/depth/points'
+        }]
     )
 
     octomap_node = Node(
@@ -37,9 +38,12 @@ def generate_launch_description():
         executable='octomap_server_node',
         name='octomap_server',
         output='screen',
+        respawn=True,
         parameters=[
             {'resolution': 0.2},
-            {'frame_id': 'Quadrotor/DepthCamera'},
+            {'frame_id': 'world'},
+            {'sensor_model.max_range': 20.0},
+            {'publish_free_space': True},
             {'use_sim_time': use_sim_time}
         ],
         remappings=[
