@@ -1,0 +1,17 @@
+cave_explorer:
+  ros__parameters:
+    # Frame and Topic names
+    map_topic: "projected_map"
+    base_frame: "true_body"
+    
+    # Exploration parameters
+    exploration_altitude: 15.0       # Target z-level for all movement
+    safety_distance_m: 0.8           # Minimum distance from walls (meters)
+    min_frontier_distance_m: 0.5    # Ignore frontiers too close to the robot
+    visited_radius: 1.5             # Radius around visited points to ignore (meters)
+    exploration_direction_x: -1.0   # Direction of cave progress (-1.0 for negative X)
+    forward_bias: 10.0              # How much to prioritize forward movement
+    max_path_timeout_s: 180.0       # Timeout for path execution
+    
+    # Path Planning
+    path_smoothing_epsilon: 0.1     # Simplification factor for A* path

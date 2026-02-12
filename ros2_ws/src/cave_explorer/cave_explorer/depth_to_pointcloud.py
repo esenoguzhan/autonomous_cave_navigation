@@ -46,17 +46,10 @@ class DepthToPointCloud(Node):
             return
 
         try:
-            # Convert ROS Image to OpenCV image
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+            cv_image = self.bridge.imgmsg_to_cv2(msg, msg.encoding) # Changed desired_encoding
         except Exception as e:
-            self.get_logger().error(f"Error converting image: {e}")
+            self.get_logger().error(f'cv_bridge error: {e}')
             return
-
-        # Get intrinsic parameters
-        fx = self.camera_info.k[0]
-        fy = self.camera_info.k[4]
-        cx = self.camera_info.k[2]
-        cy = self.camera_info.k[5]
 
         # Handle encoding
         if msg.encoding == '16UC1':
@@ -64,40 +57,44 @@ class DepthToPointCloud(Node):
         elif msg.encoding == '32FC1':
             depth = cv_image
         else:
-            self.get_logger().warn(f"Unsupported encoding: {msg.encoding}")
+            self.get_logger().error(f'Unsupported encoding: {msg.encoding}')
             return
 
         height, width = depth.shape
-        
+        fx = self.camera_info.k[0]
+        fy = self.camera_info.k[4]
+        cx = self.camera_info.k[2]
+        cy = self.camera_info.k[5]
+
+        # Diagnostic logging (first frame only)
+        if getattr(self, '_first_frame', True):
+            self.get_logger().info(f"Depth Camera Info: res={width}x{height}, fx={fx:.2f}, fy={fy:.2f}, cx={cx:.2f}, cy={cy:.2f}")
+            self._first_frame = False
+
         # Create meshgrid
         u, v = np.meshgrid(np.arange(width), np.arange(height))
         
-        # Filter valid depth
-        valid = (depth > 0.1) & (depth < 10.0) # 10m max range
+        # Filter valid depth and downsample (stride of 2)
+        skip = 2
+        depth_sub = depth[::skip, ::skip]
+        valid = (depth_sub > 0.1) & (depth_sub < 15.0)
         
-        z = depth[valid]
-        x = (u[valid] - cx) * z / fx
-        y = (v[valid] - cy) * z / fy
+        if not np.any(valid):
+            return
+
+        z = depth_sub[valid]
+        x = (u[::skip, ::skip][valid] - cx) * z / fx
+        y = (v[::skip, ::skip][valid] - cy) * z / fy
         
         # Stack points
         points = np.stack((x, y, z), axis=-1)
         
-        # Create PointCloud2
+        # Create PointCloud2 message
         header = Header()
         header.stamp = msg.header.stamp
         header.frame_id = msg.header.frame_id
-        
-        # Use simple creation
-        # points is (N, 3)
-        # We need structured array or flat list
-        # pc2.create_cloud_xyz32 takes header and points as iterable of lists/tuples
-        
-        # Using create_cloud_xyz32 is efficient enough for Python if points is not huge
-        # But for 640x480 it might be slow.
-        # Let's try it. If slow, we optimize.
-        
-        cloud_msg = pc2.create_cloud_xyz32(header, points)
-        self.pub_cloud.publish(cloud_msg)
+        pc_msg = pc2.create_cloud_xyz32(header, points)
+        self.pub_cloud.publish(pc_msg)
 
 def main(args=None):
     rclpy.init(args=args)
