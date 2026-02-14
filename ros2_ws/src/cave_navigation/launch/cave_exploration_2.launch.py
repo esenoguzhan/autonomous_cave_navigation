@@ -1,8 +1,15 @@
+#!/usr/bin/env python3
+
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
 def generate_launch_description():
+    """
+    Cave Exploration v2: frontier_detector + sampling_planner_node
+    Replaces the original frontier_detector + rrt_planner + trajectory_generator pipeline.
+    """
     return LaunchDescription([
+        # 3D Frontier Detector (same params as cave_exploration.launch.py)
         Node(
             package='frontier_detector',
             executable='frontier_detector_node',
@@ -23,25 +30,24 @@ def generate_launch_description():
                 'min_passage_width': 1.5
             }]
         ),
+
+        # Sampling-Based Trajectory Planner (replaces rrt_planner + trajectory_generator)
         Node(
-            package='rrt_planner',
-            executable='rrt_planner_node',
-            name='rrt_planner',
+            package='sampling_based_traj_gen',
+            executable='sampling_planner_node',
+            name='sampling_planner_node',
             output='screen',
             respawn=True,
             parameters=[{
-                'step_size_factor': 0.5,
-                'bias': 0.05,
-                'timeout': 1.0,
-                'rrt_frequency': 1.0
+                'num_samples': 200,
+                'min_duration_factor': 2.0,
+                'max_duration_factor': 2.5,
+                'lateral_spread': 3.0,
+                'max_recursion_depth': 4,
+                'safety_radius': 0.5,
+                'trajectory_speed': 3.0,
+                'collision_check_dt': 0.2,
+                'planning_frequency': 1.0
             }]
         ),
-        Node(
-            package='trajectory_generator',
-            executable='trajectory_generator_node',
-            name='trajectory_generator',
-            output='screen',
-            respawn=True
-        )
     ])
-

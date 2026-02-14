@@ -8,9 +8,11 @@
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+
   <exec_depend>frontier_detector</exec_depend>
   <exec_depend>rrt_planner</exec_depend>
   <exec_depend>trajectory_generator</exec_depend>
+  <exec_depend>sampling_based_traj_gen</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
