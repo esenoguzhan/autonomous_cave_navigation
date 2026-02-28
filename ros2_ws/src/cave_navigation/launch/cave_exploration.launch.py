@@ -30,10 +30,10 @@ def generate_launch_description():
             output='screen',
             respawn=True,
             parameters=[{
-                'step_size_factor': 5.0,
-                'bias': 0.05,
+                'step_size_factor': 2.0,
+                'bias': 0.15,
                 'timeout': 1.0,
-                'rrt_frequency': 0.1
+                'rrt_frequency': 1.0
             }]
         ),
         Node(
