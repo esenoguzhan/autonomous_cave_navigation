@@ -34,7 +34,7 @@ def generate_launch_description():
     # Cave Navigation Stack (Frontier + Trajectory)
     cave_navigation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution([FindPackageShare("cave_navigation"), "launch", "cave_exploration_2.launch.py"])
+            PathJoinSubstitution([FindPackageShare("cave_navigation"), "launch", "cave_exploration.launch.py"])
         )
     )
 

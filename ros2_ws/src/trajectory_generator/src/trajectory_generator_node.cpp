@@ -22,6 +22,7 @@ public:
 
         desired_pub_ = this->create_publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>("desired_state", 10);
         complete_pub_ = this->create_publisher<std_msgs::msg::Empty>("trajectory_complete", 10);
+        traj_path_pub_ = this->create_publisher<nav_msgs::msg::Path>("planned_trajectory", 10);
 
         state_sub_ = this->create_subscription<std_msgs::msg::String>(
             "stm_mode", 1, std::bind(&TrajectoryGenerator::stateCallback, this, std::placeholders::_1));
@@ -38,7 +39,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr state_sub_;
     rclcpp::Publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr desired_pub_;
-    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr complete_pub_; // Added publisher
+    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr complete_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr traj_path_pub_;
     rclcpp::Service<trajectory_planner::srv::ExecuteTrajectory>::SharedPtr start_navigation_service_;
     rclcpp::TimerBase::SharedPtr timer_;
 
@@ -139,6 +141,31 @@ private:
         finished_pub_ = false;
         start_time_ = this->now();
         RCLCPP_INFO(this->get_logger(), "Trajectory Built. Duration: %.2f", total_time_);
+        publishTrajectoryPath();
+    }
+
+    void publishTrajectoryPath() {
+        nav_msgs::msg::Path path;
+        path.header.frame_id = "world";
+        path.header.stamp = this->now();
+
+        constexpr double dt = 0.1;
+        for (size_t i = 0; i < cxs_.size(); ++i) {
+            double T = segTimes_[i];
+            double t = 0.0;
+            while (t <= T + 1e-6) {
+                geometry_msgs::msg::PoseStamped ps;
+                ps.header.frame_id = "world";
+                ps.header.stamp = this->now();
+                ps.pose.position.x = evalCubic(cxs_[i], t, 0);
+                ps.pose.position.y = evalCubic(cys_[i], t, 0);
+                ps.pose.position.z = evalCubic(czs_[i], t, 0);
+                ps.pose.orientation.w = 1.0;
+                path.poses.push_back(ps);
+                t += dt;
+            }
+        }
+        traj_path_pub_->publish(path);
     }
 
     void timerCallback() {

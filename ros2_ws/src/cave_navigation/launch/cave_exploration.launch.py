@@ -12,15 +12,15 @@ def generate_launch_description():
             parameters=[{
                 'neighborcount_threshold': 10,
                 'bandwidth': 1.0,
-                'k_distance': 1.0,
+                'k_distance': 0.2,
                 'k_neighborcount': 1.0,
-                'k_yaw': 1.0,
-                'distance_limit': 10.0,
+                'k_yaw': 0.5,
+                'distance_limit': 80.0,
                 'publish_goal_frequency': 1.0,
                 'occ_neighbor_threshold': 5,
-                'altitude_tolerance': 3.0,
-                'safety_distance': 0.5,
-                'min_passage_width': 1.5
+                'altitude_tolerance': 10.0,
+                'safety_distance': 20.0,
+                'min_passage_width': 3.0
             }]
         ),
         Node(
@@ -30,10 +30,10 @@ def generate_launch_description():
             output='screen',
             respawn=True,
             parameters=[{
-                'step_size_factor': 0.5,
+                'step_size_factor': 5.0,
                 'bias': 0.05,
                 'timeout': 1.0,
-                'rrt_frequency': 1.0
+                'rrt_frequency': 0.1
             }]
         ),
         Node(
