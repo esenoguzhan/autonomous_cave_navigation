@@ -18,6 +18,7 @@
 #include <cmath>
 #include <memory>
 #include <map>
+#include <deque>
 
 using namespace std::chrono_literals;
 
@@ -130,6 +131,17 @@ private:
     geometry_msgs::msg::PoseStamped current_goal_pose_;
     geometry_msgs::msg::Point current_goal_point_;
     bool goal_available_ = false;
+
+    // Frontier blacklist: track positions where the drone has been stuck
+    struct BlacklistEntry {
+        double x, y, z;
+        rclcpp::Time added_at;
+    };
+    std::deque<BlacklistEntry> frontier_blacklist_;
+    static constexpr double kBlacklistRadius = 3.0;    // XY distance to consider "same" frontier
+    static constexpr double kBlacklistExpirySec = 60.0; // seconds before blacklist entry expires
+    Point3D last_selected_frontier_ = {0.0, 0.0, 0.0};
+    int same_frontier_count_ = 0;
 
     Point3D cave_entry_point_;
 
@@ -447,6 +459,30 @@ private:
         return sorted;
     }
 
+    // Returns XY distance between two points (ignoring Z)
+    double xyDistance(const Point3D& a, const Point3D& b) {
+        return std::sqrt(std::pow(a.x - b.x, 2) + std::pow(a.y - b.y, 2));
+    }
+
+    // Expire old blacklist entries and return true if position is blacklisted
+    bool isBlacklisted(const Point3D& pos) {
+        auto now = this->now();
+        frontier_blacklist_.erase(
+            std::remove_if(frontier_blacklist_.begin(), frontier_blacklist_.end(),
+                [&](const BlacklistEntry& e) {
+                    return (now - e.added_at).seconds() > kBlacklistExpirySec;
+                }),
+            frontier_blacklist_.end());
+
+        for (const auto& e : frontier_blacklist_) {
+            Point3D ep{e.x, e.y, e.z};
+            if (xyDistance(pos, ep) < kBlacklistRadius) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void selectFrontier(std::vector<Frontier>& frontiers) {
         if (frontiers.empty()) return;
 
@@ -462,13 +498,19 @@ private:
             f.score = -k_distance_ * dist + k_neighborcount_ * f.neighborcount - k_yaw_ * yaw_diff;
             
             // Strong bias toward deeper cave (more negative X = deeper)
-            // The cave goes in -X direction; more negative X means deeper in the cave
-            double forward_progress = curr_drone_position_.x - f.coordinates.x; // positive when frontier is deeper
+            double forward_progress = curr_drone_position_.x - f.coordinates.x;
             f.score += forward_progress * 2.0;
             
             // Penalize frontiers that go back toward the entrance (positive X direction)
             if (f.coordinates.x > curr_drone_position_.x) {
-                f.score -= 10.0; // Strong penalty for going backward
+                f.score -= 10.0;
+            }
+
+            // Penalize blacklisted positions (previously stuck here)
+            if (isBlacklisted(f.coordinates)) {
+                f.score -= 50.0;
+                RCLCPP_DEBUG(this->get_logger(), "Frontier [%.2f, %.2f, %.2f] is blacklisted, penalized.",
+                    f.coordinates.x, f.coordinates.y, f.coordinates.z);
             }
 
             if (f.score > best_score) {
@@ -477,16 +519,39 @@ private:
             }
         }
 
-        RCLCPP_INFO(this->get_logger(), "Selected frontier goal: [%.2f, %.2f, %.2f] score=%.2f",
-            best_f.coordinates.x, best_f.coordinates.y, best_f.coordinates.z, best_score);
+        // Detect if drone is stuck on the same frontier
+        double dist_to_last = xyDistance(best_f.coordinates, last_selected_frontier_);
+        if (dist_to_last < kBlacklistRadius) {
+            same_frontier_count_++;
+            if (same_frontier_count_ >= 5) {
+                RCLCPP_WARN(this->get_logger(),
+                    "Stuck on frontier [%.2f, %.2f] for %d cycles — blacklisting it.",
+                    last_selected_frontier_.x, last_selected_frontier_.y, same_frontier_count_);
+                frontier_blacklist_.push_back({
+                    last_selected_frontier_.x, last_selected_frontier_.y, last_selected_frontier_.z, this->now()});
+                same_frontier_count_ = 0;
+            }
+        } else {
+            same_frontier_count_ = 0;
+            last_selected_frontier_ = best_f.coordinates;
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Selected frontier goal: [%.2f, %.2f, %.2f] score=%.2f (blacklist_size=%zu)",
+            best_f.coordinates.x, best_f.coordinates.y, best_f.coordinates.z, best_score,
+            frontier_blacklist_.size());
 
         current_goal_point_.x = best_f.coordinates.x;
         current_goal_point_.y = best_f.coordinates.y;
-        // Force goal Z to drone's current altitude for safe flight
-        current_goal_point_.z = curr_drone_position_.z;
+        // Allow Z to track frontier within altitude_tolerance_; clamp if too far
+        double z_diff = best_f.coordinates.z - curr_drone_position_.z;
+        if (std::abs(z_diff) <= altitude_tolerance_) {
+            current_goal_point_.z = best_f.coordinates.z;
+        } else {
+            current_goal_point_.z = curr_drone_position_.z + std::copysign(altitude_tolerance_, z_diff);
+        }
 
-        RCLCPP_INFO(this->get_logger(), "Goal Z clamped to drone altitude: %.2f (frontier was %.2f)",
-            current_goal_point_.z, best_f.coordinates.z);
+        RCLCPP_INFO(this->get_logger(), "Goal Z: %.2f (frontier=%.2f, drone=%.2f, diff=%.2f)",
+            current_goal_point_.z, best_f.coordinates.z, curr_drone_position_.z, z_diff);
 
         current_goal_pose_.header.frame_id = "world";
         current_goal_pose_.header.stamp = this->now();
@@ -543,8 +608,7 @@ private:
         
         // Always publish the current goal if we have one
         if (goal_available_) {
-            // Update the goal Z to current drone altitude (it changes as drone moves)
-            current_goal_point_.z = curr_drone_position_.z;
+            // Z is set in selectFrontier; do NOT re-clamp here
             current_goal_pose_.pose.position = current_goal_point_;
             current_goal_pose_.header.stamp = this->now();
             

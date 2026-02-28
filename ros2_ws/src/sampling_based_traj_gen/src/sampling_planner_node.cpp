@@ -422,9 +422,11 @@ private:
         return true;
     }
 
-    // Compute minimum clearance along trajectory (for scoring)
+    // Compute minimum clearance along trajectory (for scoring).
+    // Capped at 5.0m to prevent score overflow when no obstacles are nearby.
     double minClearance(const Trajectory& traj) const {
-        double min_clear = std::numeric_limits<double>::max();
+        constexpr double kMaxClearance = 5.0;
+        double min_clear = kMaxClearance;
         for (const auto& seg : traj.segments) {
             double seg_t = 0.0;
             while (seg_t <= seg.T) {
@@ -432,7 +434,7 @@ private:
                 double y = seg.py.pos(seg_t);
                 double z = seg.pz.pos(seg_t);
                 // Probe clearance: find first occupied in radial directions
-                for (double r = 0.1; r <= 5.0; r += 0.3) {
+                for (double r = 0.1; r <= kMaxClearance; r += 0.3) {
                     bool any_occ = false;
                     double offs[6][3] = {{r,0,0},{-r,0,0},{0,r,0},{0,-r,0},{0,0,r},{0,0,-r}};
                     for (auto& off : offs) {
@@ -451,6 +453,18 @@ private:
     // Core: Sample candidate trajectories and pick the best feasible one
     // ========================================================================
 
+    // -----------------------------------------------------------------------
+    // Compute deterministic grid dimensions from a total sample budget.
+    // Returns (n_lat, n_z) such that n_lat * n_z * n_dur is close to budget,
+    // with a 5:3 lateral-to-vertical resolution preference.
+    // -----------------------------------------------------------------------
+    std::pair<int,int> gridDims(int budget, int n_dur) const {
+        int spatial = std::max(4, budget / n_dur);
+        int n_z   = std::max(2, static_cast<int>(std::round(std::sqrt(spatial * 3.0 / 5.0))));
+        int n_lat = std::max(3, spatial / n_z);
+        return {n_lat, n_z};
+    }
+
     bool sampleTrajectories(const Eigen::Vector3d& p0, const Eigen::Vector3d& v0,
                             const Eigen::Vector3d& pGoal,
                             Trajectory& best_traj, int depth = 0)
@@ -467,45 +481,57 @@ private:
         Eigen::Vector3d y_dir = x_dir.cross(arbitrary).normalized();
         Eigen::Vector3d z_dir = x_dir.cross(y_dir).normalized();
 
-        std::uniform_real_distribution<double> dur_dist(
-            nominal_T * min_dur_factor_, nominal_T * max_dur_factor_);
-        std::uniform_real_distribution<double> lat_dist(
-            -lateral_spread_, lateral_spread_);
-        std::uniform_real_distribution<double> z_dist(
-            -lateral_spread_ * 0.5, lateral_spread_ * 0.5);
+        // -----------------------------------------------------------------------
+        // Deterministic stratified grid:
+        //   n_lat lateral offsets × n_z vertical offsets × n_dur duration levels
+        //
+        // The grid center (lat=0, z=0) is the direct path to goal.
+        // Every region of the (lat, z) space is guaranteed to be probed,
+        // eliminating the "unlucky random" zigzag problem.
+        // -----------------------------------------------------------------------
+        constexpr int n_dur = 2;
+        auto [n_lat, n_z] = gridDims(num_samples_, n_dur);
+
+        double lat_step = (n_lat > 1) ? (2.0 * lateral_spread_) / (n_lat - 1) : 0.0;
+        double z_step   = (n_z > 1)   ? lateral_spread_ / (n_z - 1) : 0.0;
+
+        // Two duration levels: fastest (min_factor) and slowest (max_factor)
+        double T_min = std::max(0.5, nominal_T * min_dur_factor_);
+        double T_max = std::max(T_min + 0.1, nominal_T * max_dur_factor_);
+        double dur_vals[n_dur] = {T_min, T_max};
 
         std::vector<Trajectory> candidates;
-        candidates.reserve(num_samples_);
+        candidates.reserve(n_lat * n_z * n_dur);
 
-        for (int i = 0; i < num_samples_; ++i) {
-            double T = dur_dist(rng_);
-            T = std::max(T, 0.5);
+        int total_checked = 0;
+        for (int id = 0; id < n_dur; ++id) {
+            double T = dur_vals[id];
+            for (int il = 0; il < n_lat; ++il) {
+                double lat = -lateral_spread_ + il * lat_step;
+                for (int iz = 0; iz < n_z; ++iz) {
+                    double z_off = -lateral_spread_ * 0.5 + iz * z_step;
 
-            // Sample a goal variation (lateral + vertical offset from the true goal)
-            Eigen::Vector3d goal_offset = Eigen::Vector3d::Zero();
-            if (i > 0) {  // first sample: go exactly to goal
-                goal_offset = y_dir * lat_dist(rng_) + z_dir * z_dist(rng_);
-            }
-            Eigen::Vector3d pEnd = pGoal + goal_offset;
+                    Eigen::Vector3d goal_offset = y_dir * lat + z_dir * z_off;
+                    Eigen::Vector3d pEnd = pGoal + goal_offset;
 
-            // Build quintic from (p0, v0, a0=0) to (pEnd, v_end=0, a_end=0)
-            TrajSegment seg;
-            seg.T  = T;
-            seg.px = QuinticPoly::solve(p0.x(), v0.x(), 0, pEnd.x(), 0, 0, T);
-            seg.py = QuinticPoly::solve(p0.y(), v0.y(), 0, pEnd.y(), 0, 0, T);
-            seg.pz = QuinticPoly::solve(p0.z(), v0.z(), 0, pEnd.z(), 0, 0, T);
+                    TrajSegment seg;
+                    seg.T  = T;
+                    seg.px = QuinticPoly::solve(p0.x(), v0.x(), 0, pEnd.x(), 0, 0, T);
+                    seg.py = QuinticPoly::solve(p0.y(), v0.y(), 0, pEnd.y(), 0, 0, T);
+                    seg.pz = QuinticPoly::solve(p0.z(), v0.z(), 0, pEnd.z(), 0, 0, T);
 
-            Trajectory traj;
-            traj.segments.push_back(seg);
-            traj.computeTotalTime();
+                    Trajectory traj;
+                    traj.segments.push_back(seg);
+                    traj.computeTotalTime();
+                    ++total_checked;
 
-            // Feasibility check
-            if (isTrajectoryFeasible(traj)) {
-                // Score: prefer shorter time + larger clearance + closer to actual goal
-                double clearance = minClearance(traj);
-                double goal_dev  = goal_offset.norm();
-                traj.score = T - 0.5 * clearance + 0.3 * goal_dev;
-                candidates.push_back(traj);
+                    if (isTrajectoryFeasible(traj)) {
+                        double clearance = minClearance(traj);
+                        double goal_dev  = goal_offset.norm();
+                        traj.score = T - 0.5 * clearance + 0.3 * goal_dev;
+                        candidates.push_back(traj);
+                    }
+                }
             }
         }
 
@@ -515,8 +541,10 @@ private:
                 [](const Trajectory& a, const Trajectory& b) { return a.score < b.score; });
             best_traj = candidates[0];
             RCLCPP_INFO(this->get_logger(),
-                "Found %zu/%d feasible single-segment trajectories (best score=%.2f, T=%.2f)",
-                candidates.size(), num_samples_, best_traj.score, best_traj.total_time);
+                "Found %zu/%d feasible single-segment trajectories (best score=%.2f, T=%.2f) "
+                "[grid %dx%dx%d]",
+                candidates.size(), total_checked, best_traj.score, best_traj.total_time,
+                n_lat, n_z, n_dur);
             return true;
         }
 
@@ -530,47 +558,47 @@ private:
         RCLCPP_INFO(this->get_logger(),
             "No direct trajectory feasible. Splitting (depth=%d)...", depth);
 
-        // Sample intermediate via-points near the midpoint
+        // Deterministic grid of intermediate via-points near the midpoint
         Eigen::Vector3d midpoint = (p0 + pGoal) * 0.5;
-        int mid_samples = num_samples_ / 2;
-        std::uniform_real_distribution<double> mid_lat(-lateral_spread_ * 1.5, lateral_spread_ * 1.5);
+        double mid_spread = lateral_spread_ * 1.5;
+        auto [mn_lat, mn_z] = gridDims(num_samples_ / 2, 1);
 
-        for (int i = 0; i < mid_samples; ++i) {
-            Eigen::Vector3d via = midpoint;
-            if (i > 0) {
-                via += y_dir * mid_lat(rng_) + z_dir * mid_lat(rng_) * 0.5;
+        double m_lat_step = (mn_lat > 1) ? (2.0 * mid_spread) / (mn_lat - 1) : 0.0;
+        double m_z_step   = (mn_z > 1)   ? mid_spread / (mn_z - 1) : 0.0;
+
+        for (int il = 0; il < mn_lat; ++il) {
+            double lat = -mid_spread + il * m_lat_step;
+            for (int iz = 0; iz < mn_z; ++iz) {
+                double z_off = -mid_spread * 0.5 + iz * m_z_step;
+
+                Eigen::Vector3d via = midpoint + y_dir * lat + z_dir * z_off;
+
+                if (!isPointCollisionFree(via.x(), via.y(), via.z())) continue;
+
+                Trajectory traj_first;
+                if (!sampleTrajectories(p0, v0, via, traj_first, depth + 1)) continue;
+
+                auto& last_seg = traj_first.segments.back();
+                double T1 = last_seg.T;
+                Eigen::Vector3d v_via(last_seg.px.vel(T1), last_seg.py.vel(T1), last_seg.pz.vel(T1));
+
+                Trajectory traj_second;
+                if (!sampleTrajectories(via, v_via, pGoal, traj_second, depth + 1)) continue;
+
+                Trajectory combined;
+                combined.segments.insert(combined.segments.end(),
+                    traj_first.segments.begin(), traj_first.segments.end());
+                combined.segments.insert(combined.segments.end(),
+                    traj_second.segments.begin(), traj_second.segments.end());
+                combined.computeTotalTime();
+                combined.score = traj_first.score + traj_second.score;
+
+                best_traj = combined;
+                RCLCPP_INFO(this->get_logger(),
+                    "Multi-segment trajectory found! %zu segments, total=%.2fs",
+                    combined.segments.size(), combined.total_time);
+                return true;
             }
-
-            // Check via-point not in collision
-            if (!isPointCollisionFree(via.x(), via.y(), via.z())) continue;
-
-            // Try first half: p0 → via
-            Trajectory traj_first;
-            if (!sampleTrajectories(p0, v0, via, traj_first, depth + 1)) continue;
-
-            // Get velocity at end of first half for continuity
-            auto& last_seg = traj_first.segments.back();
-            double T1 = last_seg.T;
-            Eigen::Vector3d v_via(last_seg.px.vel(T1), last_seg.py.vel(T1), last_seg.pz.vel(T1));
-
-            // Try second half: via → pGoal
-            Trajectory traj_second;
-            if (!sampleTrajectories(via, v_via, pGoal, traj_second, depth + 1)) continue;
-
-            // Concatenate
-            Trajectory combined;
-            combined.segments.insert(combined.segments.end(),
-                traj_first.segments.begin(), traj_first.segments.end());
-            combined.segments.insert(combined.segments.end(),
-                traj_second.segments.begin(), traj_second.segments.end());
-            combined.computeTotalTime();
-            combined.score = traj_first.score + traj_second.score;
-
-            best_traj = combined;
-            RCLCPP_INFO(this->get_logger(),
-                "Multi-segment trajectory found! %zu segments, total=%.2fs",
-                combined.segments.size(), combined.total_time);
-            return true;
         }
 
         return false;
@@ -590,7 +618,7 @@ private:
             current_pose_.pose.position.z);
         Eigen::Vector3d pGoal(current_goal_.x, current_goal_.y, current_goal_.z);
 
-        if ((pGoal - p0).norm() < 1.0) {
+        if ((pGoal - p0).norm() < 0.3) {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
                 "Already near goal (dist=%.2fm).", (pGoal - p0).norm());
             return;

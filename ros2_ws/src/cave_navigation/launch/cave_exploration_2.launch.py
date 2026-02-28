@@ -19,14 +19,14 @@ def generate_launch_description():
             parameters=[{
                 'neighborcount_threshold': 10,
                 'bandwidth': 1.0,
-                'k_distance': 1.0,
+                'k_distance': 0.2,
                 'k_neighborcount': 1.0,
-                'k_yaw': 1.0,
-                'distance_limit': 10.0,
+                'k_yaw': 0.5,
+                'distance_limit': 80.0,
                 'publish_goal_frequency': 1.0,
                 'occ_neighbor_threshold': 5,
-                'altitude_tolerance': 3.0,
-                'safety_distance': 1.5,
+                'altitude_tolerance': 10.0,
+                'safety_distance': 10.0,
                 'min_passage_width': 3.0
             }]
         ),
@@ -39,13 +39,13 @@ def generate_launch_description():
             output='screen',
             respawn=True,
             parameters=[{
-                'num_samples': 200,
-                'min_duration_factor': 2.0,
-                'max_duration_factor': 2.5,
+                'num_samples': 30,
+                'min_duration_factor': 1.2,
+                'max_duration_factor': 1.8,
                 'lateral_spread': 3.0,
                 'max_recursion_depth': 4,
-                'safety_radius': 0.5,
-                'trajectory_speed': 3.0,
+                'safety_radius': 2.0,
+                'trajectory_speed': 5.0,
                 'collision_check_dt': 0.2,
                 'planning_frequency': 1.0
             }]
