@@ -15,6 +15,8 @@
 #include <geometry_msgs/msg/transform.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <trajectory_msgs/msg/multi_dof_joint_trajectory_point.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <octomap/octomap.h>
@@ -164,11 +166,17 @@ public:
             "stm_mode", 1,
             std::bind(&SamplingPlannerNode::stateCallback, this, std::placeholders::_1));
 
+        odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+            "current_state_est", 10,
+            std::bind(&SamplingPlannerNode::odomCallback, this, std::placeholders::_1));
+
         // ---- Publishers ----
         desired_pub_  = this->create_publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>(
             "desired_state", 10);
         complete_pub_ = this->create_publisher<std_msgs::msg::Empty>(
             "trajectory_complete", 10);
+        traj_path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
+            "planned_trajectory", 10);
 
         // ---- Service ----
         start_nav_srv_ = this->create_service<trajectory_planner::srv::ExecuteTrajectory>(
@@ -216,8 +224,10 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr goal_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr state_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Publisher<trajectory_msgs::msg::MultiDOFJointTrajectoryPoint>::SharedPtr desired_pub_;
     rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr complete_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr traj_path_pub_;
     rclcpp::Service<trajectory_planner::srv::ExecuteTrajectory>::SharedPtr start_nav_srv_;
     rclcpp::TimerBase::SharedPtr traj_timer_;
     rclcpp::TimerBase::SharedPtr plan_timer_;
@@ -231,6 +241,13 @@ private:
     bool octree_received_ = false;
     bool active_          = false;   // stm_mode == EXPLORE_CAVE
     bool goal_changed_    = false;   // true when frontier goal shifted >2m mid-trajectory
+    bool odom_received_   = false;
+
+    // ---- Velocity feedback (from /current_state_est) ----
+    Eigen::Vector3d current_velocity_ = Eigen::Vector3d::Zero();
+
+    // ---- Yaw state (frozen near zero speed to prevent spinning) ----
+    double last_yaw_ = 0.0;
 
     // ---- Active trajectory ----
     Trajectory active_traj_;
@@ -257,6 +274,13 @@ private:
         pose_received_ = true;
     }
 
+    void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        current_velocity_ << msg->twist.twist.linear.x,
+                             msg->twist.twist.linear.y,
+                             msg->twist.twist.linear.z;
+        odom_received_ = true;
+    }
+
     void goalCallback(const geometry_msgs::msg::Point::SharedPtr msg) {
         if (!active_) return;
         double dx = msg->x - current_goal_.x;
@@ -273,6 +297,33 @@ private:
 
     void stateCallback(const std_msgs::msg::String::SharedPtr msg) {
         active_ = (msg->data == "EXPLORE_CAVE" || msg->data == "EXPLORE");
+    }
+
+    // ========================================================================
+    // Trajectory visualization: publish planned path for RViz
+    // ========================================================================
+
+    void publishTrajectoryPath(const Trajectory& traj) {
+        nav_msgs::msg::Path path;
+        path.header.frame_id = "world";
+        path.header.stamp = this->now();
+
+        constexpr double dt = 0.05;
+        for (const auto& seg : traj.segments) {
+            double t = 0.0;
+            while (t <= seg.T + 1e-6) {
+                geometry_msgs::msg::PoseStamped ps;
+                ps.header.frame_id = "world";
+                ps.header.stamp = this->now();
+                ps.pose.position.x = seg.px.pos(t);
+                ps.pose.position.y = seg.py.pos(t);
+                ps.pose.position.z = seg.pz.pos(t);
+                ps.pose.orientation.w = 1.0;
+                path.poses.push_back(ps);
+                t += dt;
+            }
+        }
+        traj_path_pub_->publish(path);
     }
 
     // ========================================================================
@@ -545,9 +596,7 @@ private:
             return;
         }
 
-        // Current velocity is roughly zero if hovering; could be improved
-        // with actual velocity feedback
-        Eigen::Vector3d v0 = Eigen::Vector3d::Zero();
+        Eigen::Vector3d v0 = odom_received_ ? current_velocity_ : Eigen::Vector3d::Zero();
 
         Trajectory best;
         if (sampleTrajectories(p0, v0, pGoal, best)) {
@@ -556,6 +605,7 @@ private:
             finished_pub_ = false;
             goal_changed_ = false;
             traj_start_time_ = this->now();
+            publishTrajectoryPath(best);
             RCLCPP_INFO(this->get_logger(),
                 "Executing trajectory: %zu segments, %.2fs total",
                 best.segments.size(), best.total_time);
@@ -620,9 +670,12 @@ private:
         msg.transforms[0].translation.y = py;
         msg.transforms[0].translation.z = pz;
 
-        double yaw = std::atan2(vy, vx);
+        double speed_xy = std::sqrt(vx*vx + vy*vy);
+        if (speed_xy > 0.3) {
+            last_yaw_ = std::atan2(vy, vx);
+        }
         tf2::Quaternion q;
-        q.setRPY(0, 0, yaw);
+        q.setRPY(0, 0, last_yaw_);
         msg.transforms[0].rotation = tf2::toMsg(q);
 
         msg.velocities[0].linear.x = vx;
