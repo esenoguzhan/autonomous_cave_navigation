@@ -230,6 +230,7 @@ private:
     bool goal_received_   = false;
     bool octree_received_ = false;
     bool active_          = false;   // stm_mode == EXPLORE_CAVE
+    bool goal_changed_    = false;   // true when frontier goal shifted >2m mid-trajectory
 
     // ---- Active trajectory ----
     Trajectory active_traj_;
@@ -264,6 +265,7 @@ private:
         if (!goal_received_ || std::sqrt(dx*dx + dy*dy + dz*dz) > 2.0) {
             current_goal_ = *msg;
             goal_received_ = true;
+            goal_changed_  = true;
             RCLCPP_INFO(this->get_logger(),
                 "New frontier goal: [%.2f, %.2f, %.2f]", msg->x, msg->y, msg->z);
         }
@@ -529,7 +531,7 @@ private:
 
     void planTimerCallback() {
         if (!active_ || !pose_received_ || !goal_received_ || !octree_received_) return;
-        if (has_trajectory_ && !finished_pub_) return;  // already executing
+        if (has_trajectory_ && !finished_pub_ && !goal_changed_) return;  // already executing
 
         Eigen::Vector3d p0(
             current_pose_.pose.position.x,
@@ -552,6 +554,7 @@ private:
             active_traj_ = best;
             has_trajectory_ = true;
             finished_pub_ = false;
+            goal_changed_ = false;
             traj_start_time_ = this->now();
             RCLCPP_INFO(this->get_logger(),
                 "Executing trajectory: %zu segments, %.2fs total",

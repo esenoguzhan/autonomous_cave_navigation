@@ -261,6 +261,10 @@ private:
   }
   
   void onTrajectoryComplete(const std_msgs::msg::Empty::SharedPtr /*msg*/) {
+    if (current_state_ == MissionState::EXPLORE_CAVE) {
+      RCLCPP_DEBUG(this->get_logger(), "trajectory_complete ignored during EXPLORE_CAVE");
+      return;
+    }
     RCLCPP_INFO(this->get_logger(), "Received trajectory_complete signal");
     trajectory_completed_ = true;
   }
@@ -331,6 +335,7 @@ private:
       }
       if (new_state == MissionState::EXPLORE_CAVE) {
         exploration_triggered_ = false;
+        trajectory_completed_ = false;
       }
     }
   }

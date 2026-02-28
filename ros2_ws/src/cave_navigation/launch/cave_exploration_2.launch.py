@@ -26,8 +26,8 @@ def generate_launch_description():
                 'publish_goal_frequency': 1.0,
                 'occ_neighbor_threshold': 5,
                 'altitude_tolerance': 3.0,
-                'safety_distance': 0.5,
-                'min_passage_width': 1.5
+                'safety_distance': 1.5,
+                'min_passage_width': 3.0
             }]
         ),
 
