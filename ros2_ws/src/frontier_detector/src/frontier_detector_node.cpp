@@ -50,6 +50,13 @@ public:
         this->declare_parameter("pre_filter_distance", 50.0);
         // Hard cap on frontier points fed to mean-shift (random subsample)
         this->declare_parameter("max_frontiers", 3000);
+        // Clustered frontiers closer than this to the drone are discarded.
+        // Prevents micro-goals that cause stop-and-go behavior.
+        this->declare_parameter("min_frontier_distance", 8.0);
+        // "Sweet-spot" distance at which the distance term in the scoring
+        // function peaks. Frontiers near this distance get the best distance
+        // score; both closer and farther ones are penalized.
+        this->declare_parameter("preferred_frontier_distance", 30.0);
 
         neighborcount_threshold_ = this->get_parameter("neighborcount_threshold").as_int();
         bandwidth_                = this->get_parameter("bandwidth").as_double();
@@ -61,6 +68,8 @@ public:
         occ_neighbor_threshold_   = this->get_parameter("occ_neighbor_threshold").as_int();
         pre_filter_distance_      = this->get_parameter("pre_filter_distance").as_double();
         max_frontiers_            = this->get_parameter("max_frontiers").as_int();
+        min_frontier_distance_    = this->get_parameter("min_frontier_distance").as_double();
+        preferred_frontier_dist_  = this->get_parameter("preferred_frontier_distance").as_double();
 
         // Use transient_local QoS to match octomap_server publisher
         auto octomap_qos = rclcpp::QoS(1).transient_local().reliable();
@@ -112,6 +121,8 @@ private:
     int    occ_neighbor_threshold_;
     double pre_filter_distance_;
     int    max_frontiers_;
+    double min_frontier_distance_;
+    double preferred_frontier_dist_;
 
     // ROS interfaces
     rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr  octomap_sub_;
@@ -279,7 +290,17 @@ private:
         if (yaw_score > M_PI) {
             yaw_score = 2.0 * M_PI - yaw_score;
         }
-        return -k_distance_    * euclideanDistance(frontier.coordinates, curr_drone_position_)
+
+        double dist = euclideanDistance(frontier.coordinates, curr_drone_position_);
+
+        // Gaussian-shaped distance score: peaks at preferred_frontier_dist_,
+        // penalizes both too-close and too-far frontiers.  Width sigma = pref/2
+        // so 30m preferred gives good scores from ~15m to ~45m.
+        double sigma = preferred_frontier_dist_ * 0.5;
+        double dist_dev = dist - preferred_frontier_dist_;
+        double distance_score = k_distance_ * std::exp(-(dist_dev * dist_dev) / (2.0 * sigma * sigma));
+
+        return distance_score
                + k_neighborcount_ * static_cast<double>(frontier.neighborcount)
                - k_yaw_          * yaw_score;
     }
@@ -461,10 +482,13 @@ private:
                 add_entry_frontier = false;
             }
 
+            double dist_to_drone = euclideanDistance(frontier.coordinates, curr_drone_position_);
+
             if (addflag &&
                 frontier.neighborcount > neighborcount_threshold_ &&
                 add_entry_frontier &&
-                nbscore < occ_neighbor_threshold_)
+                nbscore < occ_neighbor_threshold_ &&
+                dist_to_drone > min_frontier_distance_)
             {
                 frontier.isReachable = true;
                 frontiers_sorted.push_back(frontier);

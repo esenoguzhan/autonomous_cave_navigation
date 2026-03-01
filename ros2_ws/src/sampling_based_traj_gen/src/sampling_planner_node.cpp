@@ -143,6 +143,13 @@ public:
         // the next trajectory to be stitched in with the current velocity so the
         // drone never has to come to a full stop between frontiers.
         this->declare_parameter("lookahead_distance",  5.0);
+        // Fraction of cave_exploration_speed to keep as terminal velocity.
+        // 0.0 = full stop at goal (old behavior), 0.7 = maintain 70% speed.
+        this->declare_parameter("terminal_speed_fraction", 0.7);
+        // Only treat a new frontier goal as "changed" if it moved more than this.
+        this->declare_parameter("goal_debounce_distance", 3.0);
+        // Ignore frontier goals closer than this to avoid micro-trajectories.
+        this->declare_parameter("min_goal_distance", 3.0);
 
         num_samples_           = this->get_parameter("num_samples").as_int();
         min_dur_factor_        = this->get_parameter("min_duration_factor").as_double();
@@ -155,6 +162,9 @@ public:
         collision_check_dt_    = this->get_parameter("collision_check_dt").as_double();
         planning_freq_         = this->get_parameter("planning_frequency").as_double();
         lookahead_distance_    = this->get_parameter("lookahead_distance").as_double();
+        terminal_speed_frac_   = this->get_parameter("terminal_speed_fraction").as_double();
+        goal_debounce_dist_    = this->get_parameter("goal_debounce_distance").as_double();
+        min_goal_distance_     = this->get_parameter("min_goal_distance").as_double();
 
         // ---- Subscribers ----
         auto octomap_qos = rclcpp::QoS(1).transient_local().reliable();
@@ -229,6 +239,9 @@ private:
     double collision_check_dt_;
     double planning_freq_;
     double lookahead_distance_;
+    double terminal_speed_frac_;
+    double goal_debounce_dist_;
+    double min_goal_distance_;
 
     // ---- ROS interfaces ----
     rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
@@ -294,11 +307,21 @@ private:
 
     void goalCallback(const geometry_msgs::msg::Point::SharedPtr msg) {
         if (!active_) return;
+
+        double dx = msg->x - current_goal_.x;
+        double dy = msg->y - current_goal_.y;
+        double dz = msg->z - current_goal_.z;
+        double shift = std::sqrt(dx*dx + dy*dy + dz*dz);
+
         current_goal_ = *msg;
         goal_received_ = true;
-        goal_changed_  = true;
-        RCLCPP_INFO(this->get_logger(),
-            "New frontier goal: [%.2f, %.2f, %.2f]", msg->x, msg->y, msg->z);
+
+        if (shift > goal_debounce_dist_) {
+            goal_changed_ = true;
+            RCLCPP_INFO(this->get_logger(),
+                "Frontier goal shifted %.1fm -> [%.2f, %.2f, %.2f]",
+                shift, msg->x, msg->y, msg->z);
+        }
     }
 
     void stateCallback(const std_msgs::msg::String::SharedPtr msg) {
@@ -478,6 +501,12 @@ private:
         double dist = (pGoal - p0).norm();
         if (dist < 0.5) return false;
 
+        // Terminal velocity: maintain a fraction of exploration speed in the
+        // direction of the goal so the drone doesn't decelerate to zero.
+        Eigen::Vector3d goal_dir = (pGoal - p0).normalized();
+        double vT_mag = cave_exploration_speed_ * terminal_speed_frac_;
+        Eigen::Vector3d vT = goal_dir * vT_mag;
+
         double nominal_T = dist / cave_exploration_speed_;
 
         // Build a local coordinate frame: x_dir = toward goal, y_dir and z_dir = perpendicular
@@ -522,9 +551,9 @@ private:
 
                     TrajSegment seg;
                     seg.T  = T;
-                    seg.px = QuinticPoly::solve(p0.x(), v0.x(), 0, pEnd.x(), 0, 0, T);
-                    seg.py = QuinticPoly::solve(p0.y(), v0.y(), 0, pEnd.y(), 0, 0, T);
-                    seg.pz = QuinticPoly::solve(p0.z(), v0.z(), 0, pEnd.z(), 0, 0, T);
+                    seg.px = QuinticPoly::solve(p0.x(), v0.x(), 0, pEnd.x(), vT.x(), 0, T);
+                    seg.py = QuinticPoly::solve(p0.y(), v0.y(), 0, pEnd.y(), vT.y(), 0, T);
+                    seg.pz = QuinticPoly::solve(p0.z(), v0.z(), 0, pEnd.z(), vT.z(), 0, T);
 
                     Trajectory traj;
                     traj.segments.push_back(seg);
@@ -625,17 +654,20 @@ private:
 
         double dist_to_goal = (pGoal - p0).norm();
 
+        // Skip goals that are too close — the drone will fly past them and new
+        // frontiers will appear as the octomap updates.
+        if (dist_to_goal < min_goal_distance_) {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Goal too close (%.2fm < %.1fm), waiting for farther frontier.",
+                dist_to_goal, min_goal_distance_);
+            return;
+        }
+
         // Replan if: no active trajectory, trajectory finished, goal changed, OR
         // drone is within lookahead_distance of the current goal (so the next
         // trajectory is stitched in with current velocity before the drone stops).
-        bool near_goal = (dist_to_goal < lookahead_distance_) && (dist_to_goal > 0.3);
+        bool near_goal = (dist_to_goal < lookahead_distance_) && (dist_to_goal > min_goal_distance_);
         if (has_trajectory_ && !finished_pub_ && !goal_changed_ && !near_goal) return;
-
-        if (dist_to_goal < 0.3) {
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-                "Already near goal (dist=%.2fm).", dist_to_goal);
-            return;
-        }
 
         Eigen::Vector3d v0 = odom_received_ ? current_velocity_ : Eigen::Vector3d::Zero();
 

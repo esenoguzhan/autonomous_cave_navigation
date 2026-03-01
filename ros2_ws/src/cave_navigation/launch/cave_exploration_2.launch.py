@@ -9,7 +9,7 @@ def generate_launch_description():
     Replaces the original frontier_detector + rrt_planner + trajectory_generator pipeline.
     """
     return LaunchDescription([
-        # 3D Frontier Detector — parameters matched to previous year's frontier_detector.yaml
+        # 3D Frontier Detector
         Node(
             package='frontier_detector',
             executable='frontier_detector_node',
@@ -19,18 +19,20 @@ def generate_launch_description():
             parameters=[{
                 'neighborcount_threshold': 100,
                 'bandwidth': 17.0,
-                'k_distance': 1.0,
+                'k_distance': 15.0,
                 'k_neighborcount': 0.1,
                 'k_yaw': 55.0,
                 'distance_limit': 600.0,
-                'publish_goal_frequency': 10.0,
+                'publish_goal_frequency': 2.0,
                 'occ_neighbor_threshold': 1,
-                'pre_filter_distance': 50.0,
+                'pre_filter_distance': 60.0,
                 'max_frontiers': 3000,
+                'min_frontier_distance': 8.0,
+                'preferred_frontier_distance': 30.0,
             }]
         ),
 
-        # Sampling-Based Trajectory Planner (replaces rrt_planner + trajectory_generator)
+        # Sampling-Based Trajectory Planner
         Node(
             package='sampling_based_traj_gen',
             executable='sampling_planner_node',
@@ -39,16 +41,19 @@ def generate_launch_description():
             respawn=True,
             parameters=[{
                 'num_samples': 30,
-                'min_duration_factor': 1.2,
+                'min_duration_factor': 1.0,
                 'max_duration_factor': 1.8,
                 'lateral_spread': 3.0,
                 'max_recursion_depth': 4,
                 'safety_radius': 2.0,
                 'navigate_to_cave_speed': 10.0,
-                'cave_exploration_speed': 2.5,
+                'cave_exploration_speed': 5.0,
                 'collision_check_dt': 0.2,
-                'planning_frequency': 10.0,
-                'lookahead_distance': 8.0
+                'planning_frequency': 2.0,
+                'lookahead_distance': 15.0,
+                'terminal_speed_fraction': 0.7,
+                'goal_debounce_distance': 5.0,
+                'min_goal_distance': 5.0,
             }]
         ),
     ])
