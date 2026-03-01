@@ -9,7 +9,7 @@ def generate_launch_description():
     Replaces the original frontier_detector + rrt_planner + trajectory_generator pipeline.
     """
     return LaunchDescription([
-        # 3D Frontier Detector (same params as cave_exploration.launch.py)
+        # 3D Frontier Detector — parameters matched to previous year's frontier_detector.yaml
         Node(
             package='frontier_detector',
             executable='frontier_detector_node',
@@ -17,17 +17,16 @@ def generate_launch_description():
             output='screen',
             respawn=True,
             parameters=[{
-                'neighborcount_threshold': 10,
-                'bandwidth': 1.0,
-                'k_distance': 0.2,
-                'k_neighborcount': 1.0,
-                'k_yaw': 0.5,
-                'distance_limit': 80.0,
-                'publish_goal_frequency': 1.0,
-                'occ_neighbor_threshold': 5,
-                'altitude_tolerance': 10.0,
-                'safety_distance': 20.0,
-                'min_passage_width': 3.0
+                'neighborcount_threshold': 100,
+                'bandwidth': 17.0,
+                'k_distance': 1.0,
+                'k_neighborcount': 0.1,
+                'k_yaw': 55.0,
+                'distance_limit': 600.0,
+                'publish_goal_frequency': 2.0,
+                'occ_neighbor_threshold': 1,
+                'pre_filter_distance': 50.0,
+                'max_frontiers': 3000,
             }]
         ),
 
@@ -45,7 +44,7 @@ def generate_launch_description():
                 'lateral_spread': 3.0,
                 'max_recursion_depth': 4,
                 'safety_radius': 2.0,
-                'trajectory_speed': 5.0,
+                'trajectory_speed': 4.0,
                 'collision_check_dt': 0.2,
                 'planning_frequency': 1.0
             }]

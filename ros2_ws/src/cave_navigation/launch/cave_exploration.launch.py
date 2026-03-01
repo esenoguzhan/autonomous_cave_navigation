@@ -10,17 +10,16 @@ def generate_launch_description():
             output='screen',
             respawn=True,
             parameters=[{
-                'neighborcount_threshold': 10,
-                'bandwidth': 1.0,
-                'k_distance': 0.2,
-                'k_neighborcount': 1.0,
-                'k_yaw': 0.5,
-                'distance_limit': 80.0,
-                'publish_goal_frequency': 1.0,
-                'occ_neighbor_threshold': 5,
-                'altitude_tolerance': 10.0,
-                'safety_distance': 20.0,
-                'min_passage_width': 3.0
+                'neighborcount_threshold': 100,
+                'bandwidth': 17.0,
+                'k_distance': 1.0,
+                'k_neighborcount': 0.1,
+                'k_yaw': 55.0,
+                'distance_limit': 600.0,
+                'publish_goal_frequency': 2.0,
+                'occ_neighbor_threshold': 1,
+                'pre_filter_distance': 50.0,
+                'max_frontiers': 3000,
             }]
         ),
         Node(

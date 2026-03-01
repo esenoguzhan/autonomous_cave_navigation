@@ -8,17 +8,17 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/point.hpp>
-#include <nav_msgs/srv/get_plan.hpp>
-#include <tf2_ros/transform_listener.h>
-#include <tf2_ros/buffer.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_srvs/srv/empty.hpp>
 #include <std_srvs/srv/trigger.hpp>
-#include <vector>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <algorithm>
 #include <cmath>
 #include <memory>
-#include <map>
-#include <deque>
+#include <random>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -36,592 +36,572 @@ struct Frontier {
 class FrontierDetector : public rclcpp::Node {
 public:
     FrontierDetector() : Node("frontier_detector") {
-        // Parameters
-        this->declare_parameter("neighborcount_threshold", 5);
-        this->declare_parameter("bandwidth", 1.0);
+        // Parameters - same as previous year's frontier_detector.yaml
+        this->declare_parameter("neighborcount_threshold", 100);
+        this->declare_parameter("bandwidth", 17.0);
         this->declare_parameter("k_distance", 1.0);
-        this->declare_parameter("k_neighborcount", 1.0);
-        this->declare_parameter("k_yaw", 10.0);
-        this->declare_parameter("distance_limit", 10.0);
-        this->declare_parameter("publish_goal_frequency", 1.0);
-        this->declare_parameter("occ_neighbor_threshold", 5);
-        this->declare_parameter("altitude_tolerance", 3.0);
-        this->declare_parameter("safety_distance", 0.5);
-        this->declare_parameter("min_passage_width", 0.5);
+        this->declare_parameter("k_neighborcount", 0.1);
+        this->declare_parameter("k_yaw", 55.0);
+        this->declare_parameter("distance_limit", 600.0);
+        this->declare_parameter("publish_goal_frequency", 2.0);
+        this->declare_parameter("occ_neighbor_threshold", 1);
+        // Pre-filter distance: only keep frontier points within this XY radius
+        // before mean-shift. Prevents O(n²) explosion on large maps.
+        this->declare_parameter("pre_filter_distance", 50.0);
+        // Hard cap on frontier points fed to mean-shift (random subsample)
+        this->declare_parameter("max_frontiers", 3000);
 
         neighborcount_threshold_ = this->get_parameter("neighborcount_threshold").as_int();
-        bandwidth_ = this->get_parameter("bandwidth").as_double();
-        k_distance_ = this->get_parameter("k_distance").as_double();
-        k_neighborcount_ = this->get_parameter("k_neighborcount").as_double();
-        k_yaw_ = this->get_parameter("k_yaw").as_double();
-        distance_limit_ = this->get_parameter("distance_limit").as_double();
-        publish_goal_frequency_ = this->get_parameter("publish_goal_frequency").as_double();
-        occ_neighbor_threshold_ = this->get_parameter("occ_neighbor_threshold").as_int();
-        altitude_tolerance_ = this->get_parameter("altitude_tolerance").as_double();
-        safety_distance_ = this->get_parameter("safety_distance").as_double();
-        min_passage_width_ = this->get_parameter("min_passage_width").as_double();
+        bandwidth_                = this->get_parameter("bandwidth").as_double();
+        k_distance_               = this->get_parameter("k_distance").as_double();
+        k_neighborcount_          = this->get_parameter("k_neighborcount").as_double();
+        k_yaw_                    = this->get_parameter("k_yaw").as_double();
+        distance_limit_           = this->get_parameter("distance_limit").as_double();
+        publish_goal_frequency_   = this->get_parameter("publish_goal_frequency").as_double();
+        occ_neighbor_threshold_   = this->get_parameter("occ_neighbor_threshold").as_int();
+        pre_filter_distance_      = this->get_parameter("pre_filter_distance").as_double();
+        max_frontiers_            = this->get_parameter("max_frontiers").as_int();
 
-        // Subscribers & Publishers
-        // Use transient_local QoS to match the octomap_server publisher
+        // Use transient_local QoS to match octomap_server publisher
         auto octomap_qos = rclcpp::QoS(1).transient_local().reliable();
         octomap_sub_ = this->create_subscription<octomap_msgs::msg::Octomap>(
-            "octomap_binary", octomap_qos, std::bind(&FrontierDetector::octomapCallback, this, std::placeholders::_1));
-        
+            "octomap_binary", octomap_qos,
+            std::bind(&FrontierDetector::parseOctomap, this, std::placeholders::_1));
+
         pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-            "pose_est", 1, std::bind(&FrontierDetector::poseCallback, this, std::placeholders::_1));
+            "pose_est", 1,
+            std::bind(&FrontierDetector::currentPosition, this, std::placeholders::_1));
 
         state_sub_ = this->create_subscription<std_msgs::msg::String>(
-            "stm_mode", 1, std::bind(&FrontierDetector::stateCallback, this, std::placeholders::_1));
+            "stm_mode", 1,
+            std::bind(&FrontierDetector::onStateStm, this, std::placeholders::_1));
 
         frontier_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("frontiers", 1);
-        goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("frontier_goal_pose", 1);
+        goal_pub_     = this->create_publisher<geometry_msgs::msg::PoseStamped>("frontier_goal_pose", 1);
         goal_point_pub_ = this->create_publisher<geometry_msgs::msg::Point>("frontier_goal", 1);
 
-        // Service Server for starting exploration override
+        // OctoMap reset service client
+        octomap_reset_client_ = this->create_client<std_srvs::srv::Empty>("octomap_server/reset");
+
+        // Service for start_exploration (kept for mission_control compatibility, state controls logic)
         start_exploration_srv_ = this->create_service<std_srvs::srv::Trigger>(
-            "start_exploration", std::bind(&FrontierDetector::startExplorationCallback, this, std::placeholders::_1, std::placeholders::_2));
+            "start_exploration",
+            std::bind(&FrontierDetector::startExplorationCallback, this,
+                      std::placeholders::_1, std::placeholders::_2));
 
-        // Timer
+        // Timer for publishing goal at fixed frequency
         timer_ = this->create_wall_timer(
-            std::chrono::duration<double>(1.0 / publish_goal_frequency_), 
-            std::bind(&FrontierDetector::timerCallback, this));
+            std::chrono::duration<double>(1.0 / publish_goal_frequency_),
+            std::bind(&FrontierDetector::publishGoal, this));
 
-        // TF
-        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
-        tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-
+        // Cave entrance coordinates (same as previous year)
         cave_entry_point_ = {-321.0, 10.0, 15.0};
+
         RCLCPP_INFO(this->get_logger(), "Frontier Detector Initialized");
     }
 
 private:
-    int neighborcount_threshold_;
+    // Parameters
+    int    neighborcount_threshold_;
     double bandwidth_;
     double k_distance_;
     double k_neighborcount_;
     double k_yaw_;
     double distance_limit_;
     double publish_goal_frequency_;
-    int occ_neighbor_threshold_;
-    double altitude_tolerance_;
-    double safety_distance_;
-    double min_passage_width_;
+    int    occ_neighbor_threshold_;
+    double pre_filter_distance_;
+    int    max_frontiers_;
 
-    rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
+    // ROS interfaces
+    rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr  octomap_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
-    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr state_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr       state_sub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr frontier_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
-    rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr goal_point_pub_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_exploration_srv_;
+    rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr      goal_point_pub_;
+    rclcpp::Client<std_srvs::srv::Empty>::SharedPtr              octomap_reset_client_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr           start_exploration_srv_;
     rclcpp::TimerBase::SharedPtr timer_;
-    
-    std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
-    std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
-    Point3D curr_drone_position_;
-    double drone_yaw_ = 0.0;
-    std::string current_state_ = "IDLE";
-    bool exploration_active_ = false;
-    double octomap_res_ = 0.5;
-    octomap_msgs::msg::Octomap::SharedPtr cached_octomap_msg_;
-    bool octomap_dirty_ = false; // true when we have a new octomap not yet processed
-    int timer_tick_ = 0;  // counts timer ticks for periodic reprocessing
+    // State
+    Point3D     curr_drone_position_ = {0.0, 0.0, 0.0};
+    double      drone_yaw_           = 0.0;
+    std::string statemachine_state_  = "IDLE";
+    bool        octomap_reset_done_  = false;
+    float       octomap_res_         = 0.5f;
+    // True between resetOctomap() call and the first post-reset message.
+    // While set, parseOctomap skips stale pre-reset messages.
+    bool        waiting_for_reset_   = false;
 
-    geometry_msgs::msg::PoseStamped current_goal_pose_;
-    geometry_msgs::msg::Point current_goal_point_;
+    // Current best goal (set in selectFrontier, published by timer)
+    geometry_msgs::msg::PoseStamped goal_message_;
+    geometry_msgs::msg::Point       goal_point_;
     bool goal_available_ = false;
-
-    // Frontier blacklist: track positions where the drone has been stuck
-    struct BlacklistEntry {
-        double x, y, z;
-        rclcpp::Time added_at;
-    };
-    std::deque<BlacklistEntry> frontier_blacklist_;
-    static constexpr double kBlacklistRadius = 3.0;    // XY distance to consider "same" frontier
-    static constexpr double kBlacklistExpirySec = 60.0; // seconds before blacklist entry expires
-    Point3D last_selected_frontier_ = {0.0, 0.0, 0.0};
-    int same_frontier_count_ = 0;
 
     Point3D cave_entry_point_;
 
-    void startExplorationCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
-                                  std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
-        exploration_active_ = true;
-        res->success = true;
-        res->message = "Exploration triggered in Frontier Detector";
-        RCLCPP_INFO(this->get_logger(), "Exploration triggered via service.");
-        (void)req;
-    }
+    // =========================================================================
+    // State callback — triggers OctoMap reset exactly once on EXPLORE entry
+    // (mirrors prev year's onStateStm)
+    // =========================================================================
+    void onStateStm(const std_msgs::msg::String::SharedPtr msg) {
+        std::string prev = statemachine_state_;
+        statemachine_state_ = msg->data;
 
-    void stateCallback(const std_msgs::msg::String::SharedPtr msg) {
-        current_state_ = msg->data;
-        if (current_state_ == "EXPLORE_CAVE" || current_state_ == "EXPLORE") {
-             exploration_active_ = true;
-        } else {
-             exploration_active_ = false;
+        bool entering_explore = (statemachine_state_ == "EXPLORE_CAVE" ||
+                                 statemachine_state_ == "EXPLORE");
+        bool was_not_exploring = (prev != "EXPLORE_CAVE" && prev != "EXPLORE");
+
+        if (entering_explore && was_not_exploring && !octomap_reset_done_) {
+            RCLCPP_INFO(this->get_logger(),
+                "Reached cave entry. Resetting OctoMap and starting cave exploration.");
+            resetOctomap();
+            octomap_reset_done_ = true;
         }
     }
 
-    void poseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+    // =========================================================================
+    // start_exploration service stub (mission_control compatibility)
+    // =========================================================================
+    void startExplorationCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+    {
+        res->success = true;
+        res->message = "Frontier Detector: exploration controlled by state machine";
+        RCLCPP_INFO(this->get_logger(), "start_exploration service called (state machine controls logic).");
+    }
+
+    // =========================================================================
+    // Pose callback
+    // =========================================================================
+    void currentPosition(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
         curr_drone_position_.x = msg->pose.position.x;
         curr_drone_position_.y = msg->pose.position.y;
         curr_drone_position_.z = msg->pose.position.z;
 
-        tf2::Quaternion q(
+        tf2::Quaternion quat(
             msg->pose.orientation.x,
             msg->pose.orientation.y,
             msg->pose.orientation.z,
             msg->pose.orientation.w);
-        tf2::Matrix3x3 m(q);
+        tf2::Matrix3x3 mat(quat);
         double roll, pitch;
-        m.getRPY(roll, pitch, drone_yaw_);
+        mat.getRPY(roll, pitch, drone_yaw_);
     }
 
-    void octomapCallback(const octomap_msgs::msg::Octomap::SharedPtr msg) {
-        // Always cache the latest octomap
-        cached_octomap_msg_ = msg;
-        octomap_dirty_ = true;
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-            "Received octomap update (cached). exploration_active=%d", exploration_active_);
-
-        // If exploration is active, process immediately
-        if (exploration_active_) {
-            processOctomap();
-        }
-    }
-
-    void processOctomap() {
-        if (!cached_octomap_msg_) return;
-
-        octomap::AbstractOcTree* tree = octomap_msgs::msgToMap(*cached_octomap_msg_);
-        octomap::OcTree* octree = dynamic_cast<octomap::OcTree*>(tree);
-
-        if (!octree) {
-            RCLCPP_ERROR(this->get_logger(), "Failed to cast to OcTree");
-            if(tree) delete tree;
+    // =========================================================================
+    // OctoMap reset (calls octomap_server/reset service)
+    // =========================================================================
+    void resetOctomap() {
+        if (!octomap_reset_client_->wait_for_service(1s)) {
+            RCLCPP_WARN(this->get_logger(), "OctoMap reset service not available, skipping.");
             return;
         }
+        // Block processing of stale pre-reset OctoMap messages
+        waiting_for_reset_ = true;
+        auto request = std::make_shared<std_srvs::srv::Empty::Request>();
+        octomap_reset_client_->async_send_request(request);
+        RCLCPP_INFO(this->get_logger(), "OctoMap reset requested. Skipping stale messages until reset.");
+    }
 
-        octomap_res_ = octree->getResolution();
-        RCLCPP_INFO(this->get_logger(), 
-            "Processing Octomap. Resolution: %.2f, Leafs: %zu", octomap_res_, octree->getNumLeafNodes());
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+    double euclideanDistance(const Point3D& p1, const Point3D& p2) {
+        double dx = p1.x - p2.x;
+        double dy = p1.y - p2.y;
+        double dz = p1.z - p2.z;
+        return std::sqrt(dx*dx + dy*dy + dz*dz);
+    }
 
-        std::vector<Frontier> frontiers;
+    double gaussianKernel(double distance) {
+        return std::exp(-(distance * distance) / (2.0 * bandwidth_ * bandwidth_));
+    }
 
-        for (auto it = octree->begin_leafs(); it != octree->end_leafs(); ++it) {
-            if (!octree->isNodeOccupied(*it)) {
-                double fx = it.getX();
-                double fy = it.getY();
-                double fz = it.getZ();
+    // =========================================================================
+    // Mean shift clustering — O(n²), faithful port of previous year
+    // =========================================================================
+    std::vector<Point3D> meanShiftClustering(
+        const std::vector<Frontier>& points, double convergenceThreshold)
+    {
+        RCLCPP_INFO(this->get_logger(), "MeanShiftClustering starting (%zu points)", points.size());
 
-                // Pre-filter: skip frontiers too far above/below drone altitude
-                double dz_abs = std::abs(fz - curr_drone_position_.z);
-                if (dz_abs > altitude_tolerance_) continue;
+        std::vector<Point3D> shiftedPoints;
+        shiftedPoints.reserve(points.size());
+        for (const auto& f : points) {
+            shiftedPoints.push_back(f.coordinates);
+        }
 
-                // Pre-filter: only consider frontiers within distance_limit of drone (XY only)
-                double dist_xy = std::sqrt(
-                    std::pow(fx - curr_drone_position_.x, 2) +
-                    std::pow(fy - curr_drone_position_.y, 2));
-                if (dist_xy > distance_limit_) continue;
+        bool converged = false;
+        while (!converged) {
+            converged = true;
+            for (size_t i = 0; i < shiftedPoints.size(); ++i) {
+                Point3D original = shiftedPoints[i];
+                Point3D shifted  = {0.0, 0.0, 0.0};
+                double  totalW   = 0.0;
 
-                bool is_frontier = false;
-                for (int dx = -1; dx <= 1 && !is_frontier; ++dx) {
-                    for (int dy = -1; dy <= 1 && !is_frontier; ++dy) {
-                        for (int dz = -1; dz <= 1 && !is_frontier; ++dz) {
-                            if (dx == 0 && dy == 0 && dz == 0) continue;
-                            octomap::OcTreeKey neighborKey = it.getKey();
-                            neighborKey[0] += dx;
-                            neighborKey[1] += dy;
-                            neighborKey[2] += dz;
-                            if (octree->search(neighborKey) == nullptr) {
-                                is_frontier = true;
-                            }
-                        }
-                    }
+                for (const auto& p : points) {
+                    double dist   = euclideanDistance(original, p.coordinates);
+                    double weight = gaussianKernel(dist);
+                    shifted.x += p.coordinates.x * weight;
+                    shifted.y += p.coordinates.y * weight;
+                    shifted.z += p.coordinates.z * weight;
+                    totalW    += weight;
                 }
 
-                if (is_frontier) {
-                    Frontier f;
-                    f.coordinates.x = fx;
-                    f.coordinates.y = fy;
-                    f.coordinates.z = fz;
-                    frontiers.push_back(f);
+                if (totalW > 0.0) {
+                    shifted.x /= totalW;
+                    shifted.y /= totalW;
+                    shifted.z /= totalW;
+                }
+
+                if (euclideanDistance(original, shifted) > convergenceThreshold) {
+                    shiftedPoints[i] = shifted;
+                    converged = false;
                 }
             }
         }
 
-        RCLCPP_INFO(this->get_logger(), "Found %zu frontier points (within %.1fm)", frontiers.size(), distance_limit_);
+        RCLCPP_INFO(this->get_logger(), "Clustering done: %zu cluster points", shiftedPoints.size());
+        return shiftedPoints;
+    }
+
+    // =========================================================================
+    // Score function — identical to previous year
+    // =========================================================================
+    double getScore(const Frontier& frontier) {
+        double yaw_to_frontier = std::atan2(
+            frontier.coordinates.y - curr_drone_position_.y,
+            frontier.coordinates.x - curr_drone_position_.x);
+        double yaw_score = std::abs(yaw_to_frontier - drone_yaw_);
+        if (yaw_score > M_PI) {
+            yaw_score = 2.0 * M_PI - yaw_score;
+        }
+        return -k_distance_    * euclideanDistance(frontier.coordinates, curr_drone_position_)
+               + k_neighborcount_ * static_cast<double>(frontier.neighborcount)
+               - k_yaw_          * yaw_score;
+    }
+
+    // =========================================================================
+    // Timer callback — publish goal only when exploring
+    // (mirrors previous year's publish_goal)
+    // =========================================================================
+    void publishGoal() {
+        if (statemachine_state_ != "EXPLORE_CAVE" && statemachine_state_ != "EXPLORE") {
+            return;
+        }
+        if (!goal_available_) return;
+
+        goal_pub_->publish(goal_message_);
+        goal_point_pub_->publish(goal_point_);
+        RCLCPP_INFO(this->get_logger(), "Publishing goal: [%.2f, %.2f, %.2f]",
+            goal_point_.x, goal_point_.y, goal_point_.z);
+    }
+
+    // =========================================================================
+    // Set goal message — mirrors previous year's set_goal_message
+    // =========================================================================
+    void setGoalMessage(const Frontier& best_frontier) {
+        goal_message_.header.frame_id   = "world";
+        goal_message_.header.stamp      = this->now();
+        goal_message_.pose.position.x   = best_frontier.coordinates.x;
+        goal_message_.pose.position.y   = best_frontier.coordinates.y;
+        goal_message_.pose.position.z   = best_frontier.coordinates.z;
+
+        double goal_yaw = std::atan2(
+            best_frontier.coordinates.y - curr_drone_position_.y,
+            best_frontier.coordinates.x - curr_drone_position_.x);
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, goal_yaw);
+        goal_message_.pose.orientation.x = q.x();
+        goal_message_.pose.orientation.y = q.y();
+        goal_message_.pose.orientation.z = q.z();
+        goal_message_.pose.orientation.w = q.w();
+
+        goal_point_.x = best_frontier.coordinates.x;
+        goal_point_.y = best_frontier.coordinates.y;
+        goal_point_.z = best_frontier.coordinates.z;
+
+        goal_available_ = true;
+    }
+
+    // =========================================================================
+    // Select best frontier — mirrors previous year's select_frontier
+    // =========================================================================
+    void selectFrontier(const std::vector<Frontier>& points_sorted) {
+        if (points_sorted.empty()) return;
+
+        Frontier best = points_sorted[0];
+        best.score = getScore(best);
+
+        for (const auto& f : points_sorted) {
+            Frontier candidate = f;
+            candidate.score = getScore(candidate);
+            if (candidate.score > best.score) {
+                best = candidate;
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Best frontier: [%.2f, %.2f, %.2f] score=%.2f reachable=%d",
+            best.coordinates.x, best.coordinates.y, best.coordinates.z,
+            best.score, best.isReachable ? 1 : 0);
+
+        if (best.isReachable &&
+            euclideanDistance(curr_drone_position_, best.coordinates) < distance_limit_)
+        {
+            setGoalMessage(best);
+        }
+    }
+
+    // =========================================================================
+    // Publish RViz markers — mirrors previous year's publish_markers
+    // =========================================================================
+    void publishMarkers(const std::vector<Frontier>& points_sorted) {
+        visualization_msgs::msg::MarkerArray markerArray;
+
+        visualization_msgs::msg::Marker clear;
+        clear.id     = 0;
+        clear.ns     = "frontier";
+        clear.action = visualization_msgs::msg::Marker::DELETEALL;
+        markerArray.markers.push_back(clear);
+
+        for (int i = 0; i < static_cast<int>(points_sorted.size()); ++i) {
+            visualization_msgs::msg::Marker m;
+            m.header.frame_id = "world";
+            m.header.stamp    = this->now();
+            m.ns              = "frontier";
+            m.id              = i + 1;
+            m.type            = visualization_msgs::msg::Marker::CUBE;
+            m.action          = visualization_msgs::msg::Marker::ADD;
+            m.pose.position.x = points_sorted[i].coordinates.x;
+            m.pose.position.y = points_sorted[i].coordinates.y;
+            m.pose.position.z = points_sorted[i].coordinates.z;
+            m.pose.orientation.w = 1.0;
+            m.scale.x         = octomap_res_;
+            m.scale.y         = octomap_res_;
+            m.scale.z         = octomap_res_;
+            m.color.r         = 1.0f;
+            m.color.g         = 0.0f;
+            m.color.b         = 0.0f;
+            m.color.a         = 1.0f;
+            markerArray.markers.push_back(m);
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Publishing %zu frontier markers",
+            points_sorted.size());
+        frontier_pub_->publish(markerArray);
+    }
+
+    // =========================================================================
+    // Sort / filter frontiers — mirrors previous year's sort_frontiers
+    //   - Real neighborcount (cluster density)
+    //   - 8-corner occupied-neighbor check (occ_neighbor_threshold)
+    //   - Cave entrance filter (entry_tol = 25)
+    //   - isReachable always true (same as prev year's working state)
+    // =========================================================================
+    std::vector<Frontier> sortFrontiers(
+        const std::vector<Point3D>& frontiers_clustered,
+        octomap::OcTree* octree)
+    {
+        RCLCPP_INFO(this->get_logger(), "Sorting frontiers (%zu clustered points)",
+            frontiers_clustered.size());
+
+        std::vector<Frontier> frontiers_sorted;
+
+        for (const auto& f1 : frontiers_clustered) {
+            Frontier frontier;
+            frontier.coordinates  = f1;
+            frontier.neighborcount = 0;
+
+            // Count cluster density: how many clustered points are within octomap_res
+            for (const auto& f2 : frontiers_clustered) {
+                if (euclideanDistance(f1, f2) < static_cast<double>(octomap_res_)) {
+                    frontier.neighborcount++;
+                }
+            }
+
+            // Deduplication: skip if already have a frontier within octomap_res
+            bool addflag = true;
+            for (const auto& f3 : frontiers_sorted) {
+                if (euclideanDistance(f3.coordinates, frontier.coordinates) <
+                    static_cast<double>(octomap_res_))
+                {
+                    addflag = false;
+                    break;
+                }
+            }
+
+            // Count occupied corner-neighbors (8 corners, dx≠0 && dy≠0 && dz≠0)
+            int nbscore = 0;
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        if (dx != 0 && dy != 0 && dz != 0) {
+                            octomap::point3d pt(
+                                frontier.coordinates.x + octomap_res_ * dx,
+                                frontier.coordinates.y + octomap_res_ * dy,
+                                frontier.coordinates.z + octomap_res_ * dz);
+                            octomap::OcTreeNode* result = octree->search(pt);
+                            if (result != nullptr && octree->isNodeOccupied(result)) {
+                                nbscore++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Cave entrance filter: don't return to entrance once inside
+            int  entry_tol         = 25;
+            bool add_entry_frontier = true;
+            if (curr_drone_position_.x < cave_entry_point_.x - entry_tol &&
+                frontier.coordinates.x  > cave_entry_point_.x - entry_tol)
+            {
+                add_entry_frontier = false;
+            }
+
+            if (addflag &&
+                frontier.neighborcount > neighborcount_threshold_ &&
+                add_entry_frontier &&
+                nbscore < occ_neighbor_threshold_)
+            {
+                frontier.isReachable = true;
+                frontiers_sorted.push_back(frontier);
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Frontiers sorted: %zu", frontiers_sorted.size());
+        return frontiers_sorted;
+    }
+
+    // =========================================================================
+    // Main OctoMap callback — mirrors previous year's parseOctomap
+    //   - Returns immediately if not in EXPLORE state
+    //   - 8-corner neighbor check for frontier detection (dx≠0 && dy≠0 && dz≠0)
+    //   - No pre-filters (no altitude, no XY distance, no safety distance)
+    //   - Mean shift clustering → sort → select → publish markers
+    // =========================================================================
+    void parseOctomap(const octomap_msgs::msg::Octomap::SharedPtr msg) {
+        // Only process during exploration (same guard as previous year)
+        if (statemachine_state_ != "EXPLORE_CAVE" && statemachine_state_ != "EXPLORE") {
+            return;
+        }
+
+        // Skip stale pre-reset messages: wait until the map is fresh after reset.
+        // The octomap_server publishes an empty map right after reset; once we
+        // receive it, we clear the flag and resume normal processing.
+        if (waiting_for_reset_) {
+            octomap::AbstractOcTree* probe = octomap_msgs::msgToMap(*msg);
+            octomap::OcTree* probe_tree = dynamic_cast<octomap::OcTree*>(probe);
+            size_t leaf_count = probe_tree ? probe_tree->getNumLeafNodes() : 0;
+            if (probe_tree) delete probe_tree;
+
+            if (leaf_count > 100) {
+                // Still the stale large map — skip it
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Waiting for post-reset OctoMap (current has %zu nodes, skipping).",
+                    leaf_count);
+                return;
+            }
+            // Map is now fresh (empty or very small) — resume
+            waiting_for_reset_ = false;
+            RCLCPP_INFO(this->get_logger(), "Post-reset OctoMap received. Resuming frontier detection.");
+        }
+
+        octomap::AbstractOcTree* tree = octomap_msgs::msgToMap(*msg);
+        octomap::OcTree* octree = dynamic_cast<octomap::OcTree*>(tree);
+
+        if (!octree) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to parse octomap message");
+            if (tree) delete tree;
+            return;
+        }
+
+        octomap_res_ = static_cast<float>(octree->getResolution());
+        RCLCPP_INFO(this->get_logger(), "Parsing OctoMap. Resolution: %.2f, Nodes: %zu",
+            octomap_res_, octree->getNumLeafNodes());
+
+        std::vector<Frontier> frontiers;
+
+        // Frontier detection: free cell with at least one unknown corner-neighbor
+        // (identical logic to previous year: dx != 0 && dy != 0 && dz != 0)
+        for (auto it = octree->begin_leafs(); it != octree->end_leafs(); ++it) {
+            if (!octree->isNodeOccupied(*it)) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dz = -1; dz <= 1; ++dz) {
+                            if (dx != 0 && dy != 0 && dz != 0) {
+                                octomap::OcTreeKey neighborKey(
+                                    it.getKey().k[0] + dx,
+                                    it.getKey().k[1] + dy,
+                                    it.getKey().k[2] + dz);
+                                if (octree->search(neighborKey) == nullptr) {
+                                    Frontier fp;
+                                    fp.coordinates.x = it.getX();
+                                    fp.coordinates.y = it.getY();
+                                    fp.coordinates.z = it.getZ();
+                                    frontiers.push_back(fp);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Found %zu raw frontier points", frontiers.size());
 
         if (frontiers.empty()) {
             delete octree;
             return;
         }
 
-        // Fast voxel-grid clustering (replaces O(n²) mean shift)
-        std::vector<Point3D> clustered_points = voxelGridCluster(frontiers, bandwidth_);
-        RCLCPP_INFO(this->get_logger(), "Clustered into %zu points", clustered_points.size());
-
-        std::vector<Frontier> sorted_frontiers = sortFrontiers(clustered_points, octree);
-        RCLCPP_INFO(this->get_logger(), "Sorted frontiers size: %zu", sorted_frontiers.size());
-
-        if (!sorted_frontiers.empty()) {
-            selectFrontier(sorted_frontiers);
-            publishMarkers(sorted_frontiers);
+        // ── Pre-filter 1: keep only frontiers within pre_filter_distance of drone ──
+        // Prevents O(n²) explosion when the map contains a large area (e.g. just
+        // before/after cave entrance). Stays faithful to the intent of distance_limit.
+        {
+            std::vector<Frontier> nearby;
+            nearby.reserve(frontiers.size());
+            for (const auto& f : frontiers) {
+                double dx = f.coordinates.x - curr_drone_position_.x;
+                double dy = f.coordinates.y - curr_drone_position_.y;
+                if (std::sqrt(dx*dx + dy*dy) <= pre_filter_distance_) {
+                    nearby.push_back(f);
+                }
+            }
+            RCLCPP_INFO(this->get_logger(),
+                "After distance pre-filter (%.1fm): %zu frontier points",
+                pre_filter_distance_, nearby.size());
+            frontiers = std::move(nearby);
         }
 
-        octomap_dirty_ = false;
+        if (frontiers.empty()) {
+            delete octree;
+            return;
+        }
+
+        // ── Pre-filter 2: random subsample to max_frontiers_ ──
+        // Caps mean-shift O(n²) cost.  With max_frontiers_=3000 and bandwidth=17,
+        // clustering converges in a few seconds instead of hanging indefinitely.
+        if (static_cast<int>(frontiers.size()) > max_frontiers_) {
+            std::mt19937 rng(42);
+            std::shuffle(frontiers.begin(), frontiers.end(), rng);
+            frontiers.resize(max_frontiers_);
+            RCLCPP_INFO(this->get_logger(),
+                "Subsampled to %d frontier points for mean-shift.", max_frontiers_);
+        }
+
+        std::vector<Point3D> frontierpoints_clustered =
+            meanShiftClustering(frontiers, 1.0);
+
+        std::vector<Frontier> frontierpoints_sorted =
+            sortFrontiers(frontierpoints_clustered, octree);
+
+        selectFrontier(frontierpoints_sorted);
+        publishMarkers(frontierpoints_sorted);
+
         delete octree;
-    }
-
-    // Fast O(n) voxel grid clustering - bin points into voxels and return centroids
-    std::vector<Point3D> voxelGridCluster(const std::vector<Frontier>& points, double voxel_size) {
-        // Use a map keyed by voxel indices to accumulate points
-        struct VoxelKey {
-            int x, y, z;
-            bool operator<(const VoxelKey& o) const {
-                if (x != o.x) return x < o.x;
-                if (y != o.y) return y < o.y;
-                return z < o.z;
-            }
-        };
-        struct VoxelAccum {
-            double sum_x = 0, sum_y = 0, sum_z = 0;
-            int count = 0;
-        };
-        
-        // Use a larger voxel size for clustering (2m voxels)
-        double cluster_voxel = std::max(voxel_size, 2.0);
-        std::map<VoxelKey, VoxelAccum> voxels;
-
-        for (const auto& f : points) {
-            VoxelKey key;
-            key.x = static_cast<int>(std::floor(f.coordinates.x / cluster_voxel));
-            key.y = static_cast<int>(std::floor(f.coordinates.y / cluster_voxel));
-            key.z = static_cast<int>(std::floor(f.coordinates.z / cluster_voxel));
-            
-            auto& v = voxels[key];
-            v.sum_x += f.coordinates.x;
-            v.sum_y += f.coordinates.y;
-            v.sum_z += f.coordinates.z;
-            v.count++;
-        }
-
-        std::vector<Point3D> result;
-        for (const auto& [key, v] : voxels) {
-            // Only keep clusters with enough points (minimum 3 frontier cells)
-            if (v.count >= 3) {
-                Point3D p;
-                p.x = v.sum_x / v.count;
-                p.y = v.sum_y / v.count;
-                p.z = v.sum_z / v.count;
-                result.push_back(p);
-            }
-        }
-        return result;
-    }
-
-    std::vector<Point3D> meanShiftClustering(const std::vector<Frontier>& points, double threshold) {
-        std::vector<Point3D> shifted_points;
-        for (const auto& p : points) shifted_points.push_back(p.coordinates);
-
-        bool converged = false;
-        while (!converged) {
-            converged = true;
-            for (size_t i = 0; i < shifted_points.size(); ++i) {
-                Point3D original = shifted_points[i];
-                Point3D shift = {0,0,0};
-                double total_weight = 0;
-
-                for (const auto& p : points) {
-                    double dist = euclideanDistance(original, p.coordinates);
-                    double weight = std::exp(-(dist*dist)/(2*bandwidth_*bandwidth_));
-                    shift.x += p.coordinates.x * weight;
-                    shift.y += p.coordinates.y * weight;
-                    shift.z += p.coordinates.z * weight;
-                    total_weight += weight;
-                }
-                
-                if (total_weight > 0) {
-                    shift.x /= total_weight;
-                    shift.y /= total_weight;
-                    shift.z /= total_weight;
-                }
-
-                if (euclideanDistance(original, shift) > threshold) {
-                    shifted_points[i] = shift;
-                    converged = false;
-                }
-            }
-        }
-        return shifted_points;
-    }
-
-    std::vector<Frontier> sortFrontiers(const std::vector<Point3D>& clustered, octomap::OcTree* octree) {
-        std::vector<Frontier> sorted;
-        int skipped_outside = 0;
-        int skipped_obstacle = 0;
-        int skipped_narrow = 0;
-        
-        for (const auto& pt : clustered) {
-            Frontier f;
-            f.coordinates = pt;
-            f.neighborcount = neighborcount_threshold_ + 1; 
-
-            // Filter frontiers outside the cave when drone is inside
-            bool drone_inside_cave = (curr_drone_position_.x < cave_entry_point_.x);
-            bool frontier_outside_cave = (f.coordinates.x > cave_entry_point_.x + 2.0);
-            
-            if (drone_inside_cave && frontier_outside_cave) {
-                skipped_outside++;
-                continue;
-            }
-            
-            if (octree) {
-                double res = octree->getResolution();
-                
-                // Safety check: reject frontiers too close to obstacles
-                if (safety_distance_ > 0.0) {
-                    bool too_close = false;
-                    int steps = static_cast<int>(std::ceil(safety_distance_ / res));
-                    
-                    for (int dx = -steps; dx <= steps && !too_close; dx += std::max(1, steps/2)) {
-                        for (int dy = -steps; dy <= steps && !too_close; dy += std::max(1, steps/2)) {
-                            for (int dz = -steps; dz <= steps && !too_close; dz += std::max(1, steps/2)) {
-                                double cx = f.coordinates.x + dx * res;
-                                double cy = f.coordinates.y + dy * res;
-                                double cz = f.coordinates.z + dz * res;
-                                octomap::OcTreeNode* node = octree->search(cx, cy, cz);
-                                if (node && octree->isNodeOccupied(node)) {
-                                    double dist_to_occ = std::sqrt(
-                                        std::pow(f.coordinates.x - cx, 2) +
-                                        std::pow(f.coordinates.y - cy, 2) +
-                                        std::pow(f.coordinates.z - cz, 2));
-                                    if (dist_to_occ < safety_distance_) {
-                                        too_close = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    if (too_close) {
-                        skipped_obstacle++;
-                        continue;
-                    }
-                }
-                
-                // Passage width check: reject frontiers in narrow gaps/crevices
-                // A narrow gap (like the dark gap between rocks) will have mostly
-                // unknown cells around it, while valid passages have known-free cells.
-                if (min_passage_width_ > 0.0) {
-                    int check_steps = static_cast<int>(std::ceil(min_passage_width_ / res));
-                    int free_count = 0;
-                    int total_checked = 0;
-                    
-                    // Sample cells in a sphere around the frontier
-                    for (int dx = -check_steps; dx <= check_steps; dx += 2) {
-                        for (int dy = -check_steps; dy <= check_steps; dy += 2) {
-                            for (int dz = -check_steps; dz <= check_steps; dz += 2) {
-                                double cx = f.coordinates.x + dx * res;
-                                double cy = f.coordinates.y + dy * res;
-                                double cz = f.coordinates.z + dz * res;
-                                double dist = std::sqrt(dx*dx + dy*dy + dz*dz) * res;
-                                if (dist > min_passage_width_) continue;
-                                
-                                total_checked++;
-                                octomap::OcTreeNode* node = octree->search(cx, cy, cz);
-                                if (node && !octree->isNodeOccupied(node)) {
-                                    free_count++;
-                                }
-                                // If node is nullptr (unknown) or occupied, it's not free
-                            }
-                        }
-                    }
-                    
-                    // If less than 40% of surrounding cells are known-free,
-                    // this is likely a narrow gap or a crevice, not a real passage
-                    double free_ratio = (total_checked > 0) ? 
-                        static_cast<double>(free_count) / total_checked : 0.0;
-                    if (free_ratio < 0.4) {
-                        skipped_narrow++;
-                        continue;
-                    }
-                }
-            }
-            
-            sorted.push_back(f);
-        }
-        
-        RCLCPP_INFO(this->get_logger(), 
-            "After filtering: %zu remain (skipped %d outside, %d close to walls, %d narrow gaps)",
-            sorted.size(), skipped_outside, skipped_obstacle, skipped_narrow);
-        return sorted;
-    }
-
-    // Returns XY distance between two points (ignoring Z)
-    double xyDistance(const Point3D& a, const Point3D& b) {
-        return std::sqrt(std::pow(a.x - b.x, 2) + std::pow(a.y - b.y, 2));
-    }
-
-    // Expire old blacklist entries and return true if position is blacklisted
-    bool isBlacklisted(const Point3D& pos) {
-        auto now = this->now();
-        frontier_blacklist_.erase(
-            std::remove_if(frontier_blacklist_.begin(), frontier_blacklist_.end(),
-                [&](const BlacklistEntry& e) {
-                    return (now - e.added_at).seconds() > kBlacklistExpirySec;
-                }),
-            frontier_blacklist_.end());
-
-        for (const auto& e : frontier_blacklist_) {
-            Point3D ep{e.x, e.y, e.z};
-            if (xyDistance(pos, ep) < kBlacklistRadius) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void selectFrontier(std::vector<Frontier>& frontiers) {
-        if (frontiers.empty()) return;
-
-        double best_score = -1e9;
-        Frontier best_f = frontiers[0];
-
-        for (auto& f : frontiers) {
-            double dist = euclideanDistance(f.coordinates, curr_drone_position_);
-            double yaw_to_f = std::atan2(f.coordinates.y - curr_drone_position_.y, f.coordinates.x - curr_drone_position_.x);
-            double yaw_diff = std::abs(yaw_to_f - drone_yaw_);
-            if (yaw_diff > M_PI) yaw_diff = 2*M_PI - yaw_diff;
-
-            f.score = -k_distance_ * dist + k_neighborcount_ * f.neighborcount - k_yaw_ * yaw_diff;
-            
-            // Strong bias toward deeper cave (more negative X = deeper)
-            double forward_progress = curr_drone_position_.x - f.coordinates.x;
-            f.score += forward_progress * 2.0;
-            
-            // Penalize frontiers that go back toward the entrance (positive X direction)
-            if (f.coordinates.x > curr_drone_position_.x) {
-                f.score -= 10.0;
-            }
-
-            // Penalize blacklisted positions (previously stuck here)
-            if (isBlacklisted(f.coordinates)) {
-                f.score -= 50.0;
-                RCLCPP_DEBUG(this->get_logger(), "Frontier [%.2f, %.2f, %.2f] is blacklisted, penalized.",
-                    f.coordinates.x, f.coordinates.y, f.coordinates.z);
-            }
-
-            if (f.score > best_score) {
-                best_score = f.score;
-                best_f = f;
-            }
-        }
-
-        // Detect if drone is stuck on the same frontier
-        double dist_to_last = xyDistance(best_f.coordinates, last_selected_frontier_);
-        if (dist_to_last < kBlacklistRadius) {
-            same_frontier_count_++;
-            if (same_frontier_count_ >= 5) {
-                RCLCPP_WARN(this->get_logger(),
-                    "Stuck on frontier [%.2f, %.2f] for %d cycles — blacklisting it.",
-                    last_selected_frontier_.x, last_selected_frontier_.y, same_frontier_count_);
-                frontier_blacklist_.push_back({
-                    last_selected_frontier_.x, last_selected_frontier_.y, last_selected_frontier_.z, this->now()});
-                same_frontier_count_ = 0;
-            }
-        } else {
-            same_frontier_count_ = 0;
-            last_selected_frontier_ = best_f.coordinates;
-        }
-
-        RCLCPP_INFO(this->get_logger(), "Selected frontier goal: [%.2f, %.2f, %.2f] score=%.2f (blacklist_size=%zu)",
-            best_f.coordinates.x, best_f.coordinates.y, best_f.coordinates.z, best_score,
-            frontier_blacklist_.size());
-
-        current_goal_point_.x = best_f.coordinates.x;
-        current_goal_point_.y = best_f.coordinates.y;
-        // Allow Z to track frontier within altitude_tolerance_; clamp if too far
-        double z_diff = best_f.coordinates.z - curr_drone_position_.z;
-        if (std::abs(z_diff) <= altitude_tolerance_) {
-            current_goal_point_.z = best_f.coordinates.z;
-        } else {
-            current_goal_point_.z = curr_drone_position_.z + std::copysign(altitude_tolerance_, z_diff);
-        }
-
-        RCLCPP_INFO(this->get_logger(), "Goal Z: %.2f (frontier=%.2f, drone=%.2f, diff=%.2f)",
-            current_goal_point_.z, best_f.coordinates.z, curr_drone_position_.z, z_diff);
-
-        current_goal_pose_.header.frame_id = "world";
-        current_goal_pose_.header.stamp = this->now();
-        current_goal_pose_.pose.position = current_goal_point_;
-        current_goal_pose_.pose.orientation.w = 1.0; 
-
-        goal_available_ = true;
-    }
-
-    void publishMarkers(const std::vector<Frontier>& frontiers) {
-        visualization_msgs::msg::MarkerArray markers;
-        visualization_msgs::msg::Marker clear_marker;
-        clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
-        markers.markers.push_back(clear_marker);
-
-        int id = 0;
-        for (const auto& f : frontiers) {
-            visualization_msgs::msg::Marker m;
-            m.header.frame_id = "world";
-            m.header.stamp = this->now();
-            m.ns = "frontiers";
-            m.id = ++id;
-            m.type = visualization_msgs::msg::Marker::CUBE;
-            m.action = visualization_msgs::msg::Marker::ADD;
-            m.pose.position.x = f.coordinates.x;
-            m.pose.position.y = f.coordinates.y;
-            m.pose.position.z = f.coordinates.z;
-            m.scale.x = octomap_res_;
-            m.scale.y = octomap_res_;
-            m.scale.z = octomap_res_;
-            m.color.r = 1.0;
-            m.color.a = 1.0;
-            markers.markers.push_back(m);
-        }
-        frontier_pub_->publish(markers);
-    }
-
-    void timerCallback() {
-        if (!exploration_active_) return;
-        
-        timer_tick_++;
-        
-        // Reprocess cached octomap every 3 ticks (~3 seconds at 1Hz)
-        // This ensures frontiers are refreshed as the drone moves,
-        // even if no new octomap messages arrive
-        bool should_reprocess = (cached_octomap_msg_ != nullptr) && 
-            (octomap_dirty_ || (timer_tick_ % 3 == 0));
-        
-        if (should_reprocess) {
-            RCLCPP_INFO(this->get_logger(), "Reprocessing octomap (tick=%d, dirty=%d)", 
-                timer_tick_, octomap_dirty_ ? 1 : 0);
-            processOctomap();
-        }
-        
-        // Always publish the current goal if we have one
-        if (goal_available_) {
-            // Z is set in selectFrontier; do NOT re-clamp here
-            current_goal_pose_.pose.position = current_goal_point_;
-            current_goal_pose_.header.stamp = this->now();
-            
-            goal_pub_->publish(current_goal_pose_);
-            goal_point_pub_->publish(current_goal_point_);
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                "Publishing goal: [%.2f, %.2f, %.2f]",
-                current_goal_point_.x, current_goal_point_.y, current_goal_point_.z);
-        }
-    }
-
-    double euclideanDistance(const Point3D& a, const Point3D& b) {
-        return std::sqrt(std::pow(a.x-b.x, 2) + std::pow(a.y-b.y, 2) + std::pow(a.z-b.z, 2));
     }
 };
 
