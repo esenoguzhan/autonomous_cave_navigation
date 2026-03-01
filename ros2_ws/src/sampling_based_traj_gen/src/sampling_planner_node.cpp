@@ -128,31 +128,33 @@ public:
       rng_(std::random_device{}())
     {
         // ---- Parameters ----
-        this->declare_parameter("num_samples",        30);
-        this->declare_parameter("min_duration_factor", 0.6);
-        this->declare_parameter("max_duration_factor", 2.5);
-        this->declare_parameter("lateral_spread",      3.0);
-        this->declare_parameter("max_recursion_depth",  3);
-        this->declare_parameter("safety_radius",       0.5);
-        this->declare_parameter("trajectory_speed",    2.0);
-        this->declare_parameter("collision_check_dt",  0.2);
-        this->declare_parameter("planning_frequency",  1.0);
+        this->declare_parameter("num_samples",           30);
+        this->declare_parameter("min_duration_factor",   0.6);
+        this->declare_parameter("max_duration_factor",   2.5);
+        this->declare_parameter("lateral_spread",        3.0);
+        this->declare_parameter("max_recursion_depth",    3);
+        this->declare_parameter("safety_radius",         0.5);
+        this->declare_parameter("navigate_to_cave_speed", 6.0);
+        this->declare_parameter("cave_exploration_speed", 2.0);
+        this->declare_parameter("collision_check_dt",    0.2);
+        this->declare_parameter("planning_frequency",    1.0);
         // When the drone is within this distance of the current goal, trigger a
         // replan even if the active trajectory has not finished yet.  This allows
         // the next trajectory to be stitched in with the current velocity so the
         // drone never has to come to a full stop between frontiers.
         this->declare_parameter("lookahead_distance",  5.0);
 
-        num_samples_        = this->get_parameter("num_samples").as_int();
-        min_dur_factor_     = this->get_parameter("min_duration_factor").as_double();
-        max_dur_factor_     = this->get_parameter("max_duration_factor").as_double();
-        lateral_spread_     = this->get_parameter("lateral_spread").as_double();
-        max_recursion_      = this->get_parameter("max_recursion_depth").as_int();
-        safety_radius_      = this->get_parameter("safety_radius").as_double();
-        traj_speed_         = this->get_parameter("trajectory_speed").as_double();
-        collision_check_dt_ = this->get_parameter("collision_check_dt").as_double();
-        planning_freq_      = this->get_parameter("planning_frequency").as_double();
-        lookahead_distance_ = this->get_parameter("lookahead_distance").as_double();
+        num_samples_           = this->get_parameter("num_samples").as_int();
+        min_dur_factor_        = this->get_parameter("min_duration_factor").as_double();
+        max_dur_factor_        = this->get_parameter("max_duration_factor").as_double();
+        lateral_spread_        = this->get_parameter("lateral_spread").as_double();
+        max_recursion_         = this->get_parameter("max_recursion_depth").as_int();
+        safety_radius_         = this->get_parameter("safety_radius").as_double();
+        navigate_to_cave_speed_ = this->get_parameter("navigate_to_cave_speed").as_double();
+        cave_exploration_speed_ = this->get_parameter("cave_exploration_speed").as_double();
+        collision_check_dt_    = this->get_parameter("collision_check_dt").as_double();
+        planning_freq_         = this->get_parameter("planning_frequency").as_double();
+        lookahead_distance_    = this->get_parameter("lookahead_distance").as_double();
 
         // ---- Subscribers ----
         auto octomap_qos = rclcpp::QoS(1).transient_local().reliable();
@@ -205,8 +207,9 @@ public:
         RCLCPP_INFO(this->get_logger(),
             "╚════════════════════════════════════════════════════════════╝");
         RCLCPP_INFO(this->get_logger(),
-            "  samples=%d  lat_spread=%.1f  safety_r=%.2f  speed=%.1f",
-            num_samples_, lateral_spread_, safety_radius_, traj_speed_);
+            "  samples=%d  lat_spread=%.1f  safety_r=%.2f  nav_speed=%.1f  expl_speed=%.1f",
+            num_samples_, lateral_spread_, safety_radius_,
+            navigate_to_cave_speed_, cave_exploration_speed_);
     }
 
     ~SamplingPlannerNode() {
@@ -221,7 +224,8 @@ private:
     double lateral_spread_;
     int    max_recursion_;
     double safety_radius_;
-    double traj_speed_;
+    double navigate_to_cave_speed_;
+    double cave_exploration_speed_;
     double collision_check_dt_;
     double planning_freq_;
     double lookahead_distance_;
@@ -350,18 +354,18 @@ private:
             Eigen::Vector3d p0(poses[i].position.x,   poses[i].position.y,   poses[i].position.z);
             Eigen::Vector3d pT(poses[i+1].position.x, poses[i+1].position.y, poses[i+1].position.z);
             double dist = (pT - p0).norm();
-            double T = std::max(1.0, dist / traj_speed_);
+            double T = std::max(1.0, dist / navigate_to_cave_speed_);
 
             // Intermediate via-points: non-zero velocity matching direction
             Eigen::Vector3d v0 = Eigen::Vector3d::Zero();
             Eigen::Vector3d vT = Eigen::Vector3d::Zero();
             if (i > 0) {
                 Eigen::Vector3d pp(poses[i-1].position.x, poses[i-1].position.y, poses[i-1].position.z);
-                v0 = (pT - pp).normalized() * traj_speed_ * 0.5;
+                v0 = (pT - pp).normalized() * navigate_to_cave_speed_ * 0.5;
             }
             if (i + 2 < poses.size()) {
                 Eigen::Vector3d pn(poses[i+2].position.x, poses[i+2].position.y, poses[i+2].position.z);
-                vT = (pn - p0).normalized() * traj_speed_ * 0.5;
+                vT = (pn - p0).normalized() * navigate_to_cave_speed_ * 0.5;
             }
 
             TrajSegment seg;
@@ -474,7 +478,7 @@ private:
         double dist = (pGoal - p0).norm();
         if (dist < 0.5) return false;
 
-        double nominal_T = dist / traj_speed_;
+        double nominal_T = dist / cave_exploration_speed_;
 
         // Build a local coordinate frame: x_dir = toward goal, y_dir and z_dir = perpendicular
         Eigen::Vector3d x_dir = (pGoal - p0).normalized();

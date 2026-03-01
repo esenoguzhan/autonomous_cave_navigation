@@ -44,7 +44,8 @@ def generate_launch_description():
                 'lateral_spread': 3.0,
                 'max_recursion_depth': 4,
                 'safety_radius': 2.0,
-                'trajectory_speed': 2.0,
+                'navigate_to_cave_speed': 10.0,
+                'cave_exploration_speed': 2.5,
                 'collision_check_dt': 0.2,
                 'planning_frequency': 10.0,
                 'lookahead_distance': 8.0
