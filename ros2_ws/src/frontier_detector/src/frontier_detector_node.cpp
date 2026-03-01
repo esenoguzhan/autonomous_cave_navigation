@@ -155,12 +155,12 @@ private:
                                  statemachine_state_ == "EXPLORE");
         bool was_not_exploring = (prev != "EXPLORE_CAVE" && prev != "EXPLORE");
 
-        if (entering_explore && was_not_exploring && !octomap_reset_done_) {
-            RCLCPP_INFO(this->get_logger(),
-                "Reached cave entry. Resetting OctoMap and starting cave exploration.");
-            resetOctomap();
-            octomap_reset_done_ = true;
-        }
+        // if (entering_explore && was_not_exploring && !octomap_reset_done_) {
+        //     RCLCPP_INFO(this->get_logger(),
+        //         "Reached cave entry. Resetting OctoMap and starting cave exploration.");
+        //     resetOctomap();
+        //     octomap_reset_done_ = true;
+        // }
     }
 
     // =========================================================================

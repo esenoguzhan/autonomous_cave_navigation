@@ -34,7 +34,7 @@ def generate_launch_description():
     # Cave Navigation Stack (Frontier + Trajectory)
     cave_navigation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            PathJoinSubstitution([FindPackageShare("cave_navigation"), "launch", "cave_exploration_2.launch.py"])
+            PathJoinSubstitution([FindPackageShare("cave_navigation"), "launch", "cave_exploration.launch.py"])
         )
     )
 
@@ -55,7 +55,12 @@ def generate_launch_description():
             {'use_sim_time': True}
         ],
     )
-
+    # Lantern Detection 
+    lantern_detection_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([FindPackageShare("lantern_detection_pkg"), "launch", "detection_node.launch.py"])
+        )
+    )
     # RViz2
     rviz_config = os.path.join(
         get_package_share_directory('cave_navigation'),
@@ -79,5 +84,6 @@ def generate_launch_description():
         perception_launch,
         mission_control_node,
         cave_navigation_launch,
+        lantern_detection_launch,
         rviz_node,
     ])

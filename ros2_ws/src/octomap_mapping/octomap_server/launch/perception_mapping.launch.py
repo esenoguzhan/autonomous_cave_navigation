@@ -47,7 +47,7 @@ def generate_launch_description():
         name='octomap_server',
         output='screen',
         parameters=[
-            {'resolution': 0.5},
+            {'resolution': 1.0},
             {'frame_id': 'world'}, 
             {'sensor_model/max_range': 100.0},
             {'use_sim_time': use_sim_time}
