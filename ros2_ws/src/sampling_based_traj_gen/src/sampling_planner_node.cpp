@@ -137,6 +137,11 @@ public:
         this->declare_parameter("trajectory_speed",    2.0);
         this->declare_parameter("collision_check_dt",  0.2);
         this->declare_parameter("planning_frequency",  1.0);
+        // When the drone is within this distance of the current goal, trigger a
+        // replan even if the active trajectory has not finished yet.  This allows
+        // the next trajectory to be stitched in with the current velocity so the
+        // drone never has to come to a full stop between frontiers.
+        this->declare_parameter("lookahead_distance",  5.0);
 
         num_samples_        = this->get_parameter("num_samples").as_int();
         min_dur_factor_     = this->get_parameter("min_duration_factor").as_double();
@@ -147,6 +152,7 @@ public:
         traj_speed_         = this->get_parameter("trajectory_speed").as_double();
         collision_check_dt_ = this->get_parameter("collision_check_dt").as_double();
         planning_freq_      = this->get_parameter("planning_frequency").as_double();
+        lookahead_distance_ = this->get_parameter("lookahead_distance").as_double();
 
         // ---- Subscribers ----
         auto octomap_qos = rclcpp::QoS(1).transient_local().reliable();
@@ -218,6 +224,7 @@ private:
     double traj_speed_;
     double collision_check_dt_;
     double planning_freq_;
+    double lookahead_distance_;
 
     // ---- ROS interfaces ----
     rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr octomap_sub_;
@@ -283,16 +290,11 @@ private:
 
     void goalCallback(const geometry_msgs::msg::Point::SharedPtr msg) {
         if (!active_) return;
-        double dx = msg->x - current_goal_.x;
-        double dy = msg->y - current_goal_.y;
-        double dz = msg->z - current_goal_.z;
-        if (!goal_received_ || std::sqrt(dx*dx + dy*dy + dz*dz) > 2.0) {
-            current_goal_ = *msg;
-            goal_received_ = true;
-            goal_changed_  = true;
-            RCLCPP_INFO(this->get_logger(),
-                "New frontier goal: [%.2f, %.2f, %.2f]", msg->x, msg->y, msg->z);
-        }
+        current_goal_ = *msg;
+        goal_received_ = true;
+        goal_changed_  = true;
+        RCLCPP_INFO(this->get_logger(),
+            "New frontier goal: [%.2f, %.2f, %.2f]", msg->x, msg->y, msg->z);
     }
 
     void stateCallback(const std_msgs::msg::String::SharedPtr msg) {
@@ -610,7 +612,6 @@ private:
 
     void planTimerCallback() {
         if (!active_ || !pose_received_ || !goal_received_ || !octree_received_) return;
-        if (has_trajectory_ && !finished_pub_ && !goal_changed_) return;  // already executing
 
         Eigen::Vector3d p0(
             current_pose_.pose.position.x,
@@ -618,9 +619,17 @@ private:
             current_pose_.pose.position.z);
         Eigen::Vector3d pGoal(current_goal_.x, current_goal_.y, current_goal_.z);
 
-        if ((pGoal - p0).norm() < 0.3) {
+        double dist_to_goal = (pGoal - p0).norm();
+
+        // Replan if: no active trajectory, trajectory finished, goal changed, OR
+        // drone is within lookahead_distance of the current goal (so the next
+        // trajectory is stitched in with current velocity before the drone stops).
+        bool near_goal = (dist_to_goal < lookahead_distance_) && (dist_to_goal > 0.3);
+        if (has_trajectory_ && !finished_pub_ && !goal_changed_ && !near_goal) return;
+
+        if (dist_to_goal < 0.3) {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
-                "Already near goal (dist=%.2fm).", (pGoal - p0).norm());
+                "Already near goal (dist=%.2fm).", dist_to_goal);
             return;
         }
 

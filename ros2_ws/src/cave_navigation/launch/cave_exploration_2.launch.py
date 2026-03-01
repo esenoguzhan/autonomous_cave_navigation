@@ -23,7 +23,7 @@ def generate_launch_description():
                 'k_neighborcount': 0.1,
                 'k_yaw': 55.0,
                 'distance_limit': 600.0,
-                'publish_goal_frequency': 2.0,
+                'publish_goal_frequency': 10.0,
                 'occ_neighbor_threshold': 1,
                 'pre_filter_distance': 50.0,
                 'max_frontiers': 3000,
@@ -44,9 +44,10 @@ def generate_launch_description():
                 'lateral_spread': 3.0,
                 'max_recursion_depth': 4,
                 'safety_radius': 2.0,
-                'trajectory_speed': 4.0,
+                'trajectory_speed': 2.0,
                 'collision_check_dt': 0.2,
-                'planning_frequency': 1.0
+                'planning_frequency': 10.0,
+                'lookahead_distance': 8.0
             }]
         ),
     ])
