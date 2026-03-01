@@ -45,18 +45,11 @@ public:
         this->declare_parameter("distance_limit", 600.0);
         this->declare_parameter("publish_goal_frequency", 2.0);
         this->declare_parameter("occ_neighbor_threshold", 1);
-        // Pre-filter distance: only keep frontier points within this XY radius
-        // before mean-shift. Prevents O(n²) explosion on large maps.
-        this->declare_parameter("pre_filter_distance", 50.0);
         // Hard cap on frontier points fed to mean-shift (random subsample)
         this->declare_parameter("max_frontiers", 3000);
-        // Clustered frontiers closer than this to the drone are discarded.
-        // Prevents micro-goals that cause stop-and-go behavior.
-        this->declare_parameter("min_frontier_distance", 8.0);
-        // "Sweet-spot" distance at which the distance term in the scoring
-        // function peaks. Frontiers near this distance get the best distance
-        // score; both closer and farther ones are penalized.
-        this->declare_parameter("preferred_frontier_distance", 30.0);
+        // Only keep clustered frontiers within [min, max] distance from drone.
+        this->declare_parameter("min_frontier_distance", 10.0);
+        this->declare_parameter("max_frontier_distance", 60.0);
 
         neighborcount_threshold_ = this->get_parameter("neighborcount_threshold").as_int();
         bandwidth_                = this->get_parameter("bandwidth").as_double();
@@ -66,10 +59,9 @@ public:
         distance_limit_           = this->get_parameter("distance_limit").as_double();
         publish_goal_frequency_   = this->get_parameter("publish_goal_frequency").as_double();
         occ_neighbor_threshold_   = this->get_parameter("occ_neighbor_threshold").as_int();
-        pre_filter_distance_      = this->get_parameter("pre_filter_distance").as_double();
         max_frontiers_            = this->get_parameter("max_frontiers").as_int();
         min_frontier_distance_    = this->get_parameter("min_frontier_distance").as_double();
-        preferred_frontier_dist_  = this->get_parameter("preferred_frontier_distance").as_double();
+        max_frontier_distance_    = this->get_parameter("max_frontier_distance").as_double();
 
         // Use transient_local QoS to match octomap_server publisher
         auto octomap_qos = rclcpp::QoS(1).transient_local().reliable();
@@ -119,10 +111,9 @@ private:
     double distance_limit_;
     double publish_goal_frequency_;
     int    occ_neighbor_threshold_;
-    double pre_filter_distance_;
     int    max_frontiers_;
     double min_frontier_distance_;
-    double preferred_frontier_dist_;
+    double max_frontier_distance_;
 
     // ROS interfaces
     rclcpp::Subscription<octomap_msgs::msg::Octomap>::SharedPtr  octomap_sub_;
@@ -290,17 +281,7 @@ private:
         if (yaw_score > M_PI) {
             yaw_score = 2.0 * M_PI - yaw_score;
         }
-
-        double dist = euclideanDistance(frontier.coordinates, curr_drone_position_);
-
-        // Gaussian-shaped distance score: peaks at preferred_frontier_dist_,
-        // penalizes both too-close and too-far frontiers.  Width sigma = pref/2
-        // so 30m preferred gives good scores from ~15m to ~45m.
-        double sigma = preferred_frontier_dist_ * 0.5;
-        double dist_dev = dist - preferred_frontier_dist_;
-        double distance_score = k_distance_ * std::exp(-(dist_dev * dist_dev) / (2.0 * sigma * sigma));
-
-        return distance_score
+        return -k_distance_    * euclideanDistance(frontier.coordinates, curr_drone_position_)
                + k_neighborcount_ * static_cast<double>(frontier.neighborcount)
                - k_yaw_          * yaw_score;
     }
@@ -317,8 +298,14 @@ private:
 
         goal_pub_->publish(goal_message_);
         goal_point_pub_->publish(goal_point_);
-        RCLCPP_INFO(this->get_logger(), "Publishing goal: [%.2f, %.2f, %.2f]",
-            goal_point_.x, goal_point_.y, goal_point_.z);
+        double gd = std::sqrt(
+            std::pow(goal_point_.x - curr_drone_position_.x, 2) +
+            std::pow(goal_point_.y - curr_drone_position_.y, 2) +
+            std::pow(goal_point_.z - curr_drone_position_.z, 2));
+        RCLCPP_INFO(this->get_logger(),
+            "GOAL_PUB | goal=[%.1f,%.1f,%.1f] drone=[%.1f,%.1f,%.1f] dist=%.1fm",
+            goal_point_.x, goal_point_.y, goal_point_.z,
+            curr_drone_position_.x, curr_drone_position_.y, curr_drone_position_.z, gd);
     }
 
     // =========================================================================
@@ -352,12 +339,22 @@ private:
     // Select best frontier — mirrors previous year's select_frontier
     // =========================================================================
     void selectFrontier(const std::vector<Frontier>& points_sorted) {
-        if (points_sorted.empty()) return;
+        if (points_sorted.empty()) {
+            RCLCPP_WARN(this->get_logger(),
+                "FRONTIER | 0 candidates after filtering (min=%.0fm max=%.0fm). Drone=[%.1f, %.1f, %.1f]",
+                min_frontier_distance_, max_frontier_distance_,
+                curr_drone_position_.x, curr_drone_position_.y, curr_drone_position_.z);
+            return;
+        }
 
+        double closest_dist = 1e9, farthest_dist = 0.0;
         Frontier best = points_sorted[0];
         best.score = getScore(best);
 
         for (const auto& f : points_sorted) {
+            double d = euclideanDistance(f.coordinates, curr_drone_position_);
+            closest_dist = std::min(closest_dist, d);
+            farthest_dist = std::max(farthest_dist, d);
             Frontier candidate = f;
             candidate.score = getScore(candidate);
             if (candidate.score > best.score) {
@@ -365,9 +362,12 @@ private:
             }
         }
 
-        RCLCPP_INFO(this->get_logger(), "Best frontier: [%.2f, %.2f, %.2f] score=%.2f reachable=%d",
+        double best_dist = euclideanDistance(best.coordinates, curr_drone_position_);
+        RCLCPP_INFO(this->get_logger(),
+            "FRONTIER | %zu candidates [%.0f-%.0fm] | BEST=[%.1f,%.1f,%.1f] dist=%.1fm score=%.1f",
+            points_sorted.size(), closest_dist, farthest_dist,
             best.coordinates.x, best.coordinates.y, best.coordinates.z,
-            best.score, best.isReachable ? 1 : 0);
+            best_dist, best.score);
 
         if (best.isReachable &&
             euclideanDistance(curr_drone_position_, best.coordinates) < distance_limit_)
@@ -488,7 +488,8 @@ private:
                 frontier.neighborcount > neighborcount_threshold_ &&
                 add_entry_frontier &&
                 nbscore < occ_neighbor_threshold_ &&
-                dist_to_drone > min_frontier_distance_)
+                dist_to_drone >= min_frontier_distance_ &&
+                dist_to_drone <= max_frontier_distance_)
             {
                 frontier.isReachable = true;
                 frontiers_sorted.push_back(frontier);
@@ -581,23 +582,21 @@ private:
             return;
         }
 
-        // ── Pre-filter 1: keep only frontiers within pre_filter_distance of drone ──
-        // Prevents O(n²) explosion when the map contains a large area (e.g. just
-        // before/after cave entrance). Stays faithful to the intent of distance_limit.
+        // ── Pre-filter: keep only frontiers in [min_frontier_distance_, max_frontier_distance_] ──
+        // Reduces points before mean-shift and avoids clustering irrelevant regions.
         {
-            std::vector<Frontier> nearby;
-            nearby.reserve(frontiers.size());
+            std::vector<Frontier> in_range;
+            in_range.reserve(frontiers.size());
             for (const auto& f : frontiers) {
-                double dx = f.coordinates.x - curr_drone_position_.x;
-                double dy = f.coordinates.y - curr_drone_position_.y;
-                if (std::sqrt(dx*dx + dy*dy) <= pre_filter_distance_) {
-                    nearby.push_back(f);
+                double d = euclideanDistance(f.coordinates, curr_drone_position_);
+                if (d >= min_frontier_distance_ && d <= max_frontier_distance_) {
+                    in_range.push_back(f);
                 }
             }
             RCLCPP_INFO(this->get_logger(),
-                "After distance pre-filter (%.1fm): %zu frontier points",
-                pre_filter_distance_, nearby.size());
-            frontiers = std::move(nearby);
+                "After distance pre-filter [%.0f-%.0fm]: %zu frontier points",
+                min_frontier_distance_, max_frontier_distance_, in_range.size());
+            frontiers = std::move(in_range);
         }
 
         if (frontiers.empty()) {

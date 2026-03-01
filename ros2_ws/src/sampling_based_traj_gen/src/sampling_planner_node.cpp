@@ -653,21 +653,37 @@ private:
         Eigen::Vector3d pGoal(current_goal_.x, current_goal_.y, current_goal_.z);
 
         double dist_to_goal = (pGoal - p0).norm();
+        double speed = current_velocity_.norm();
 
-        // Skip goals that are too close — the drone will fly past them and new
-        // frontiers will appear as the octomap updates.
+        // Skip goals that are too close
         if (dist_to_goal < min_goal_distance_) {
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Goal too close (%.2fm < %.1fm), waiting for farther frontier.",
-                dist_to_goal, min_goal_distance_);
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "PLANNER | SKIP goal too close | drone=[%.1f,%.1f,%.1f] speed=%.1fm/s | goal_dist=%.1fm < min=%.1fm",
+                p0.x(), p0.y(), p0.z(), speed, dist_to_goal, min_goal_distance_);
             return;
         }
 
-        // Replan if: no active trajectory, trajectory finished, goal changed, OR
-        // drone is within lookahead_distance of the current goal (so the next
-        // trajectory is stitched in with current velocity before the drone stops).
         bool near_goal = (dist_to_goal < lookahead_distance_) && (dist_to_goal > min_goal_distance_);
-        if (has_trajectory_ && !finished_pub_ && !goal_changed_ && !near_goal) return;
+        bool need_replan = !has_trajectory_ || finished_pub_ || goal_changed_ || near_goal;
+
+        if (!need_replan) {
+            double t_elapsed = (this->now() - traj_start_time_).seconds();
+            double t_remain = active_traj_.total_time - t_elapsed;
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "PLANNER | TRACKING | drone=[%.1f,%.1f,%.1f] speed=%.1fm/s | goal_dist=%.1fm | traj_remain=%.1fs",
+                p0.x(), p0.y(), p0.z(), speed, dist_to_goal, t_remain);
+            return;
+        }
+
+        const char* reason = !has_trajectory_ ? "no_traj" :
+                             finished_pub_    ? "traj_done" :
+                             goal_changed_    ? "goal_changed" :
+                             near_goal        ? "near_goal" : "unknown";
+
+        RCLCPP_INFO(this->get_logger(),
+            "PLANNER | REPLAN (%s) | drone=[%.1f,%.1f,%.1f] speed=%.1fm/s | goal=[%.1f,%.1f,%.1f] dist=%.1fm",
+            reason, p0.x(), p0.y(), p0.z(), speed,
+            pGoal.x(), pGoal.y(), pGoal.z(), dist_to_goal);
 
         Eigen::Vector3d v0 = odom_received_ ? current_velocity_ : Eigen::Vector3d::Zero();
 
@@ -680,11 +696,12 @@ private:
             traj_start_time_ = this->now();
             publishTrajectoryPath(best);
             RCLCPP_INFO(this->get_logger(),
-                "Executing trajectory: %zu segments, %.2fs total",
-                best.segments.size(), best.total_time);
+                "PLANNER | NEW TRAJ | %zu segments, %.2fs duration, v0=%.1fm/s, vT=%.1fm/s",
+                best.segments.size(), best.total_time, v0.norm(),
+                cave_exploration_speed_ * terminal_speed_frac_);
         } else {
             RCLCPP_WARN(this->get_logger(),
-                "Failed to find any feasible trajectory to goal.");
+                "PLANNER | FAILED | No feasible trajectory to goal (dist=%.1fm)", dist_to_goal);
         }
     }
 
@@ -766,7 +783,10 @@ private:
             complete_pub_->publish(std_msgs::msg::Empty());
             finished_pub_ = true;
             has_trajectory_ = false;
-            RCLCPP_INFO(this->get_logger(), "Trajectory complete.");
+            double end_speed = std::sqrt(vx*vx + vy*vy + vz*vz);
+            RCLCPP_INFO(this->get_logger(),
+                "PLANNER | TRAJ DONE | end_pos=[%.1f,%.1f,%.1f] end_speed=%.1fm/s",
+                px, py, pz, end_speed);
         }
     }
 };
