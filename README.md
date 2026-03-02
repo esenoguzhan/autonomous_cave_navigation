@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/cc8e2acb-b561-40a3-b652-1bcd92baa889
 2. `octomap_server` converts depth images to point clouds and builds a 3D voxel map
 3. `mission_control` orchestrates the mission phases via a state machine
 4. `frontier_detector` identifies unexplored regions at the boundary of the OctoMap
-5. `trajectory_generator` plans smooth, collision-free quintic polynomial trajectories to frontier goals
+5. `sampling_based_traj_gen` plans smooth, collision-free quintic polynomial trajectories to frontier goals
 6. `controller` tracks the desired trajectory using geometric control on SE(3)
 
 ## Packages
@@ -29,11 +29,12 @@ https://github.com/user-attachments/assets/cc8e2acb-b561-40a3-b652-1bcd92baa889
 | Package | Description |
 |---|---|
 | **`simulation`** | Unity-ROS2 bridge. Streams sensor data (depth, RGB, IMU), publishes state estimates, and sends rotor commands back to the Unity simulator. *Provided by course.* |
-| **`controller`** | Geometric tracking controller based on Lee et al. Computes rotor speed commands from desired vs. current state. *Based on course template.* |
+| **`controller_pkg`** | Geometric tracking controller based on Lee et al. Computes rotor speed commands from desired vs. current state. *Based on course template.* |
 | **`octomap_mapping`** | OctoMap server that builds a 3D occupancy voxel grid from point clouds. *Third-party, with custom cave configuration.* |
 | **`mission_control`** | Finite state machine managing the full mission lifecycle: Idle, Takeoff, Navigate-to-Cave (waypoint-based), Explore-Cave (autonomous), and Finished. |
 | **`frontier_detector`** | Detects frontier voxels (boundaries between free and unknown space) in the OctoMap, clusters them using Mean-Shift, scores candidates, and publishes the best exploration goal. |
-| **`trajectory_generator`** | Sampling-based trajectory planner. Generates multiple candidate quintic polynomial trajectories toward the goal, checks them for collisions against the OctoMap, and publishes the best one. Also serves as the trajectory executor for the navigate-to-cave phase. |
+| **`sampling_based_traj_gen`** | Sampling-based trajectory planner. Generates multiple candidate quintic polynomial trajectories toward the goal, checks them for collisions against the OctoMap, and publishes the best one. Also serves as the trajectory executor for the navigate-to-cave phase. |
+| **`lantern_detection_pkg`** | Processes semantic camera to identify lanterns in the environment, computes their 3D real-world coordinates using camera intrinsics, and tracks the total count and positions of uniquely discovered lanterns. |
 | **`cave_navigation`** | Meta-package containing launch files and RViz configuration. No nodes — only orchestration. |
 
 ## Prerequisites
@@ -91,17 +92,6 @@ ros2 launch cave_navigation integrated_mission.launch.py rviz:=false
 | `perception_mapping.launch.py` | Depth-to-PCL conversion + OctoMap server |
 | `cave_exploration.launch.py` | Frontier detector + trajectory generator |
 
-## Configuration
-
-All node parameters are defined in YAML config files. No parameters are hardcoded — including ROS topic names.
-
-| Config File | Package |
-|---|---|
-| [`controller_params.yaml`](ros2_ws/src/controller/config/controller_params.yaml) | Controller gains, physical constants, topics |
-| [`mission_control_params.yaml`](ros2_ws/src/mission_control/config/mission_control_params.yaml) | State machine timing, waypoints, topics |
-| [`frontier_detector_params.yaml`](ros2_ws/src/frontier_detector/config/frontier_detector_params.yaml) | Clustering, filtering, scoring weights, topics |
-| [`sampling_planner_params.yaml`](ros2_ws/src/trajectory_generator/config/sampling_planner_params.yaml) | Trajectory sampling, speed, safety radius, topics |
-| [`cave_mapping.yaml`](ros2_ws/src/octomap_mapping/octomap_server/params/cave_mapping.yaml) | OctoMap resolution, sensor model |
 
 ## Key Design Decisions
 
